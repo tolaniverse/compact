@@ -39,7 +39,13 @@ impl TabRow {
         add_sublayer(&root, &title);
         add_sublayer(&root, &close);
         add_sublayer(parent, &root);
-        Self { root, dot, title, close, initial }
+        Self {
+            root,
+            dot,
+            title,
+            close,
+            initial,
+        }
     }
 }
 
@@ -74,7 +80,16 @@ impl Toast {
             add_sublayer(&root, l);
         }
         add_sublayer(parent, &root);
-        Self { root, dot, ws, age, body, source, action, close }
+        Self {
+            root,
+            dot,
+            ws,
+            age,
+            body,
+            source,
+            action,
+            close,
+        }
     }
 }
 
@@ -176,7 +191,14 @@ fn host(mtm: MainThreadMarker, frame: CGRect) -> (Retained<NSView>, Layer) {
 /// opacity well before it stops travelling, so it is readable the moment it is
 /// worth reading. Hidden panels keep their frame set rather than being
 /// `setHidden`, so there is something to animate *from* next time.
-fn slide(view: &NSVisualEffectView, frame: CGRect, visible: bool, travel: f64, fade: f64, motion: bool) {
+fn slide(
+    view: &NSVisualEffectView,
+    frame: CGRect,
+    visible: bool,
+    travel: f64,
+    fade: f64,
+    motion: bool,
+) {
     let alpha = if visible { 1.0 } else { 0.0 };
     if motion {
         animate(travel, || view.animator().setFrame(frame));
@@ -217,7 +239,12 @@ impl Chrome {
         let ws_dot = panel(rect(6.0, 52.0, 7.0, 7.0), accent::PRIMARY, 3.5, None);
         let ws_name = text("", 12.5, Rgba::hex(0xD6D6DC), false, Align::Left);
         let ws_count = text("", 10.0, fg::DIM, true, Align::Right);
-        let side_new_tab = panel(zero, Rgba::white(0.0), radius::TAB_SIDE, Some((Rgba::white(0.11), 1.0)));
+        let side_new_tab = panel(
+            zero,
+            Rgba::white(0.0),
+            radius::TAB_SIDE,
+            Some((Rgba::white(0.11), 1.0)),
+        );
         let side_new_label = text("+  New tab", 12.5, fg::MUTED, false, Align::Left);
         let side_new_hint = text("⌘T", 10.0, fg::FAINT, true, Align::Right);
         let side_layout_btn = panel(zero, Rgba::white(0.0), 7.0, Some((border::CARD, 1.0)));
@@ -230,9 +257,20 @@ impl Chrome {
         let elsewhere_label = text("ELSEWHERE", 9.5, fg::DIM, true, Align::Left);
         let elsewhere_hint = text("⌘⇧J", 9.5, fg::FAINT, true, Align::Right);
         for l in [
-            &ws_dot, &ws_name, &ws_count, &side_new_tab, &side_new_label, &side_new_hint,
-            &side_layout_btn, &side_layout_label, &side_gear, &side_gear_label,
-            &elsewhere_label, &elsewhere_hint, &bookmark_label, &bookmark_hint,
+            &ws_dot,
+            &ws_name,
+            &ws_count,
+            &side_new_tab,
+            &side_new_label,
+            &side_new_hint,
+            &side_layout_btn,
+            &side_layout_label,
+            &side_gear,
+            &side_gear_label,
+            &elsewhere_label,
+            &elsewhere_hint,
+            &bookmark_label,
+            &bookmark_hint,
         ] {
             add_sublayer(&sidebar_root, l);
         }
@@ -244,7 +282,13 @@ impl Chrome {
         let strip_layout = panel(zero, Rgba::white(0.0), 7.0, Some((border::CARD, 1.0)));
         let strip_layout_label = text("LAYOUT", 10.0, fg::MUTED, true, Align::Center);
         let strip_gear = text("⚙", 13.0, fg::MUTED, false, Align::Center);
-        for l in [&strip_plus, &strip_layout, &strip_layout_label, &strip_gear, &strip_divider] {
+        for l in [
+            &strip_plus,
+            &strip_layout,
+            &strip_layout_label,
+            &strip_gear,
+            &strip_divider,
+        ] {
             add_sublayer(&strip_root, l);
         }
 
@@ -255,7 +299,12 @@ impl Chrome {
         let address_star = text("☆", 12.0, fg::MUTED, false, Align::Center);
         let address_kbd = panel(zero, Rgba::white(0.0), 7.0, Some((Rgba::white(0.09), 1.0)));
         let address_kbd_label = text("⌘K", 10.0, fg::MUTED, true, Align::Center);
-        for l in [&address_icon, &address_star, &address_kbd, &address_kbd_label] {
+        for l in [
+            &address_icon,
+            &address_star,
+            &address_kbd,
+            &address_kbd_label,
+        ] {
             add_sublayer(&address_root, l);
         }
         let address_field = field(mtm, zero, 12.5, true, fg::INPUT);
@@ -272,11 +321,7 @@ impl Chrome {
         let (progress, progress_root) = host(mtm, zero);
         // Gradient plus glow, matching the canvas. A flat bar at 2px reads as a
         // rendering artefact; the bloom is what makes it legible.
-        let progress_fill = gradient(
-            zero,
-            accent::PRIMARY.with_alpha(0.35),
-            accent::PRIMARY,
-        );
+        let progress_fill = gradient(zero, accent::PRIMARY.with_alpha(0.35), accent::PRIMARY);
         add_sublayer(&progress_root, &progress_fill);
         glow(&progress_fill, accent::PRIMARY, 12.0);
 
@@ -296,7 +341,12 @@ impl Chrome {
         add_sublayer(&hint_bg, &hint_keys);
         // `cpBreathe`: the prompt pulses so it reads as a live hint rather than
         // a static label the eye stops seeing.
-        breathe(&hint_text, 0.34, 0.62, compact_core::theme::duration::BREATHE);
+        breathe(
+            &hint_text,
+            0.34,
+            0.62,
+            compact_core::theme::duration::BREATHE,
+        );
 
         // ---- toasts ----
         let (toast_host, toast_root) = host(mtm, zero);
@@ -491,16 +541,30 @@ impl Chrome {
             let kbd_w = 44.0;
             let star_w = 27.0;
             set_frame(&self.address_kbd, rect(aw - kbd_w - 6.0, 6.5, kbd_w, 27.0));
-            set_frame(&self.address_kbd_label, rect(aw - kbd_w - 6.0, 14.0, kbd_w, 13.0));
+            set_frame(
+                &self.address_kbd_label,
+                rect(aw - kbd_w - 6.0, 14.0, kbd_w, 13.0),
+            );
             // Star sits between the field and the ⌘K chip.
-            set_frame(&self.address_star, rect(aw - kbd_w - star_w - 8.0, 13.0, star_w, 16.0));
+            set_frame(
+                &self.address_star,
+                rect(aw - kbd_w - star_w - 8.0, 13.0, star_w, 16.0),
+            );
             set_text(&self.address_star, app.star_glyph());
             set_color(
                 &self.address_star,
-                if app.is_bookmarked() { accent::PRIMARY } else { fg::MUTED },
+                if app.is_bookmarked() {
+                    accent::PRIMARY
+                } else {
+                    fg::MUTED
+                },
             );
-            self.address_field
-                .setFrame(rect(28.0, (ah - 18.0) / 2.0, aw - kbd_w - star_w - 44.0, 18.0));
+            self.address_field.setFrame(rect(
+                28.0,
+                (ah - 18.0) / 2.0,
+                aw - kbd_w - star_w - 44.0,
+                18.0,
+            ));
             // Only overwrite the field while the user is not editing it.
             // Never overwrite the field while the user is in it. Renders fire
             // on every cursor move, so without this check a redraw mid-word
@@ -630,20 +694,35 @@ impl Chrome {
             }
             let t = &ws.tabs[i];
             let on = t.id == ws.active;
-            let hovered = matches!(self.hover, Some(Hit::SelectTab(h) | Hit::CloseTab(h)) if h == t.id);
+            let hovered =
+                matches!(self.hover, Some(Hit::SelectTab(h) | Hit::CloseTab(h)) if h == t.id);
             set_hidden(&row.root, false);
             set_frame(&row.root, rect(10.0, y, inner, rh));
             animated(compact_core::theme::duration::HOVER, || {
                 set_fill(&row.root, self.row_fill(on, hovered));
             });
-            set_border(&row.root, if on { border::TAB_ACTIVE } else { Rgba::white(0.0) }, 1.0);
+            set_border(
+                &row.root,
+                if on {
+                    border::TAB_ACTIVE
+                } else {
+                    Rgba::white(0.0)
+                },
+                1.0,
+            );
             set_frame(&row.dot, rect(9.0, (rh - 5.0) / 2.0, 5.0, 5.0));
             set_fill(&row.dot, if on { ws.dot } else { fill::INACTIVE_DOT });
             set_hidden(&row.initial, true);
-            set_frame(&row.title, rect(23.0, (rh - 15.0) / 2.0, inner - 50.0, 15.0));
+            set_frame(
+                &row.title,
+                rect(23.0, (rh - 15.0) / 2.0, inner - 50.0, 15.0),
+            );
             set_text(&row.title, &t.title);
             set_color(&row.title, if on { fg::PRIMARY } else { fg::SECONDARY });
-            set_frame(&row.close, rect(inner - 24.0, (rh - 15.0) / 2.0, 16.0, 15.0));
+            set_frame(
+                &row.close,
+                rect(inner - 24.0, (rh - 15.0) / 2.0, 16.0, 15.0),
+            );
             // A hibernated tab is a normal tab that happens to cost 2.3 KB, so
             // it is deliberately not badged — surfacing it would invite the user
             // to manage memory manually, which is the browser's job.
@@ -692,18 +771,45 @@ impl Chrome {
         // New tab + footer.
         set_frame(&self.side_new_tab, rect(10.0, new_tab_y, inner, 32.0));
         animated(compact_core::theme::duration::HOVER, || {
-            set_fill(&self.side_new_tab, self.row_fill(false, self.hover == Some(Hit::NewTab)));
-            set_fill(&self.side_layout_btn, self.row_fill(false, self.hover == Some(Hit::ToggleLayout)));
-            set_fill(&self.side_gear, self.row_fill(false, self.hover == Some(Hit::Settings)));
+            set_fill(
+                &self.side_new_tab,
+                self.row_fill(false, self.hover == Some(Hit::NewTab)),
+            );
+            set_fill(
+                &self.side_layout_btn,
+                self.row_fill(false, self.hover == Some(Hit::ToggleLayout)),
+            );
+            set_fill(
+                &self.side_gear,
+                self.row_fill(false, self.hover == Some(Hit::Settings)),
+            );
         });
-        set_frame(&self.side_new_label, rect(20.0, new_tab_y + 8.0, inner - 60.0, 16.0));
-        set_frame(&self.side_new_hint, rect(sw - 50.0, new_tab_y + 9.0, 30.0, 14.0));
+        set_frame(
+            &self.side_new_label,
+            rect(20.0, new_tab_y + 8.0, inner - 60.0, 16.0),
+        );
+        set_frame(
+            &self.side_new_hint,
+            rect(sw - 50.0, new_tab_y + 9.0, 30.0, 14.0),
+        );
 
         let fy = h - footer_h - 12.0;
-        set_frame(&self.side_layout_btn, rect(14.0, fy, inner - 39.0, footer_h));
-        set_frame(&self.side_layout_label, rect(14.0, fy + 8.0, inner - 39.0, 13.0));
-        set_frame(&self.side_gear, rect(sw - 14.0 - footer_h, fy, footer_h, footer_h));
-        set_frame(&self.side_gear_label, rect(sw - 14.0 - footer_h, fy + 5.0, footer_h, 17.0));
+        set_frame(
+            &self.side_layout_btn,
+            rect(14.0, fy, inner - 39.0, footer_h),
+        );
+        set_frame(
+            &self.side_layout_label,
+            rect(14.0, fy + 8.0, inner - 39.0, 13.0),
+        );
+        set_frame(
+            &self.side_gear,
+            rect(sw - 14.0 - footer_h, fy, footer_h, footer_h),
+        );
+        set_frame(
+            &self.side_gear_label,
+            rect(sw - 14.0 - footer_h, fy + 5.0, footer_h, 17.0),
+        );
     }
 
     fn sync_strip(&mut self, app: &App, w: f64) {
@@ -716,8 +822,8 @@ impl Chrome {
         let left = metric::TRAFFIC_LIGHT_INSET;
         let right_controls = 110.0;
         let avail = (w - left - right_controls - 40.0).max(0.0);
-        let tw = (avail / n.max(1) as f64 - 8.0)
-            .clamp(metric::TAB_MIN_WIDTH, metric::TAB_MAX_WIDTH);
+        let tw =
+            (avail / n.max(1) as f64 - 8.0).clamp(metric::TAB_MIN_WIDTH, metric::TAB_MAX_WIDTH);
         let rh = metric::TAB_HEIGHT_STRIP;
         let y = (metric::STRIP_HEIGHT - rh) / 2.0;
 
@@ -728,14 +834,23 @@ impl Chrome {
             }
             let t = &ws.tabs[i];
             let on = t.id == ws.active;
-            let hovered = matches!(self.hover, Some(Hit::SelectTab(h) | Hit::CloseTab(h)) if h == t.id);
+            let hovered =
+                matches!(self.hover, Some(Hit::SelectTab(h) | Hit::CloseTab(h)) if h == t.id);
             let x = left + i as f64 * (tw + 8.0);
             set_hidden(&row.root, false);
             set_frame(&row.root, rect(x, y, tw, rh));
             animated(compact_core::theme::duration::HOVER, || {
                 set_fill(&row.root, self.row_fill(on, hovered));
             });
-            set_border(&row.root, if on { border::TAB_ACTIVE } else { Rgba::white(0.0) }, 1.0);
+            set_border(
+                &row.root,
+                if on {
+                    border::TAB_ACTIVE
+                } else {
+                    Rgba::white(0.0)
+                },
+                1.0,
+            );
             set_frame(&row.dot, rect(9.0, (rh - 5.0) / 2.0, 5.0, 5.0));
             set_fill(&row.dot, if on { ws.dot } else { fill::INACTIVE_DOT });
             set_hidden(&row.initial, true);
@@ -748,7 +863,10 @@ impl Chrome {
         let plus_x = left + n as f64 * (tw + 8.0);
         set_frame(&self.strip_plus, rect(plus_x, y + 4.0, 26.0, 20.0));
         set_frame(&self.strip_layout, rect(w - 108.0, y + 1.5, 62.0, 26.0));
-        set_frame(&self.strip_layout_label, rect(w - 108.0, y + 8.0, 62.0, 13.0));
+        set_frame(
+            &self.strip_layout_label,
+            rect(w - 108.0, y + 8.0, 62.0, 13.0),
+        );
         set_frame(&self.strip_gear, rect(w - 38.0, y + 5.0, 26.0, 18.0));
 
         // Bookmarks as tinted initial chips, right-aligned before a divider.
@@ -842,7 +960,10 @@ impl Chrome {
                     set_hidden(&toast.root, false);
                     set_fill(&toast.dot, dot);
                     set_frame(&toast.ws, rect(27.0, 12.0, 120.0, 13.0));
-                    set_text(&toast.ws, &app.workspaces.spaces[n.workspace].name.to_uppercase());
+                    set_text(
+                        &toast.ws,
+                        &app.workspaces.spaces[n.workspace].name.to_uppercase(),
+                    );
                     set_color(&toast.ws, dot);
                     // Age sits left of the dismiss glyph, which is the
                     // rightmost thing in the header.
@@ -947,8 +1068,8 @@ impl Chrome {
             let n = ws.tabs.len();
             let left = metric::TRAFFIC_LIGHT_INSET;
             let avail = (w - left - 110.0 - 40.0).max(0.0);
-            let tw = (avail / n.max(1) as f64 - 8.0)
-                .clamp(metric::TAB_MIN_WIDTH, metric::TAB_MAX_WIDTH);
+            let tw =
+                (avail / n.max(1) as f64 - 8.0).clamp(metric::TAB_MIN_WIDTH, metric::TAB_MAX_WIDTH);
             for (i, t) in ws.tabs.iter().enumerate() {
                 let tx = left + i as f64 * (tw + 8.0);
                 if x >= tx && x < tx + tw {
@@ -997,7 +1118,6 @@ impl Chrome {
         }
         None
     }
-
 }
 
 /// What a click in the chrome resolved to.

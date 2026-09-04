@@ -143,11 +143,12 @@ pub mod metric {
     pub const TAB_HEIGHT_SIDE: f64 = 32.0;
     pub const TAB_MAX_WIDTH: f64 = 190.0;
     pub const TAB_MIN_WIDTH: f64 = 64.0;
-    /// Left inset on the horizontal tab strip.
+    /// Left inset on the horizontal tab strip that clears the window buttons.
     ///
-    /// The canvas reserves 88 pt here to clear the traffic lights. Compact has
-    /// none, so the strip reclaims the space and tabs start at the edge.
-    pub const TRAFFIC_LIGHT_INSET: f64 = 12.0;
+    /// The buttons are hidden until chrome is revealed, and revealed alongside
+    /// it — so whenever the strip is on screen, so are they, and the space has
+    /// to be there.
+    pub const TRAFFIC_LIGHT_INSET: f64 = 88.0;
     pub const PALETTE_WIDTH: f64 = 600.0;
     pub const PALETTE_ROW_HEIGHT: f64 = 38.0;
     pub const PALETTE_MAX_LIST_HEIGHT: f64 = 334.0;

@@ -14,9 +14,9 @@ use block2::RcBlock;
 use objc2::rc::Retained;
 use objc2::{msg_send, MainThreadMarker, MainThreadOnly};
 use objc2_app_kit::{
-    NSApplication, NSApplicationActivationPolicy, NSBackingStoreType, NSColor, NSEvent,
-    NSEventMask, NSEventModifierFlags, NSEventType, NSView, NSWindow, NSTitlebarSeparatorStyle, NSWindowButton,
-    NSWindowStyleMask,
+    NSAnimatablePropertyContainer, NSApplication, NSApplicationActivationPolicy,
+    NSBackingStoreType, NSColor, NSEvent, NSEventMask, NSEventModifierFlags, NSEventType,
+    NSTitlebarSeparatorStyle, NSView, NSWindow, NSWindowButton, NSWindowStyleMask,
     NSWindowTitleVisibility,
 };
 use objc2_core_foundation::CGRect;
@@ -33,7 +33,8 @@ use compact_mem::{Guard, PressureMonitor};
 use crate::chrome::{Chrome, Hit};
 use crate::overlays::{Overlays, SettingsHit};
 use crate::widgets::{
-    animate_card, card_transform, host_layer, identity_transform, queue_after, reset_card, rect,
+    animate, animate_card, card_transform, host_layer, identity_transform, queue_after, rect,
+    reset_card,
 };
 
 struct Inner {
@@ -54,6 +55,9 @@ struct Inner {
     /// True while a workspace transition is travelling, so `render` leaves the
     /// pages where the animation put them.
     sliding: bool,
+    /// Whether the window buttons are currently shown, so the fade runs once
+    /// per reveal rather than on every render.
+    buttons_shown: bool,
     /// Focus requested by the last action, applied after the render that makes
     /// the target visible. ⌘L reveals the address bar and focuses it in one
     /// step; focusing first would target a hidden field.
@@ -114,9 +118,7 @@ impl Inner {
             // Sliding a blank page in is worse than not sliding: the outgoing
             // page leaves, nothing visibly arrives, and the transition reads as
             // a glitch. Prewarming means this is the uncommon case.
-            Some((dir, true)) if self.app.chrome.smooth_motion => {
-                self.slide_workspace(active, dir)
-            }
+            Some((dir, true)) if self.app.chrome.smooth_motion => self.slide_workspace(active, dir),
             _ => self.engine.show(active),
         }
     }
@@ -138,7 +140,9 @@ impl Inner {
     /// keeping one per tab would mean a full-window image against a 687 B
     /// session.
     fn slide_workspace(&mut self, active: TabId, dir: i8) {
-        use compact_core::theme::{duration as dur, CARD_SCALE, CARD_TILT, CARD_TRAVEL, EASE_SLIDE};
+        use compact_core::theme::{
+            duration as dur, CARD_SCALE, CARD_TILT, CARD_TRAVEL, EASE_SLIDE,
+        };
         let outgoing = self.engine.visible();
         if outgoing == Some(active) || outgoing.is_none() {
             self.engine.show(active);
@@ -206,6 +210,7 @@ impl Inner {
         let now = self.now_ms();
         self.chrome.sync(&self.app, now);
         self.overlays.sync(&self.app);
+        self.sync_window_buttons();
         // Chrome floats above a full-bleed page, so the web view always fills
         // the window regardless of what is revealed. Skipped mid-transition, or
         // it would snap the travelling pages back to centre.
@@ -213,6 +218,57 @@ impl Inner {
             if let Some(v) = self.engine.view(self.app.workspaces.current().active) {
                 v.setFrame(rect(0.0, 0.0, size.0, size.1));
             }
+        }
+    }
+
+    /// Show the window buttons with the tab chrome, and hide them with it.
+    ///
+    /// Tied to the sidebar and strip rather than to all chrome: those are the
+    /// surfaces you reach for with the pointer, which is also when you might
+    /// want to close or resize the window. ⌘L is a keyboard gesture aimed at
+    /// the address bar, and answering it with window controls would be noise.
+    fn sync_window_buttons(&mut self) {
+        let vis = self.app.visibility();
+        let show = vis.sidebar || vis.strip;
+        if show == self.buttons_shown {
+            return;
+        }
+        self.buttons_shown = show;
+
+        let buttons: Vec<_> = WINDOW_BUTTONS
+            .iter()
+            .filter_map(|b| self.window.standardWindowButton(*b))
+            .collect();
+
+        if show {
+            for b in &buttons {
+                b.setHidden(false);
+            }
+            animate(compact_core::theme::duration::CHROME_FADE, || {
+                for b in &buttons {
+                    b.animator().setAlphaValue(1.0);
+                }
+            });
+        } else {
+            animate(compact_core::theme::duration::CHROME_FADE, || {
+                for b in &buttons {
+                    b.animator().setAlphaValue(0.0);
+                }
+            });
+            // Hide only once faded: a button at zero alpha is still clickable,
+            // and an invisible close button over the page is a trap.
+            let me = self.self_ref.clone();
+            queue_after(compact_core::theme::duration::CHROME_FADE, move || {
+                let Some(inner) = me.upgrade() else { return };
+                let i = inner.borrow();
+                if !i.buttons_shown {
+                    for b in WINDOW_BUTTONS {
+                        if let Some(button) = i.window.standardWindowButton(b) {
+                            button.setHidden(true);
+                        }
+                    }
+                }
+            });
         }
     }
 
@@ -284,22 +340,18 @@ impl Shell {
         )));
         window.setAcceptsMouseMovedEvents(true);
         window.center();
-        // No titlebar at all. The window is content edge to edge: the style
-        // mask still says Titled so the window keeps its rounded corners,
-        // shadow and resize edges, but the bar itself is transparent, its title
-        // hidden, its separator suppressed, and all three buttons removed.
+        // No titlebar. The window is content edge to edge: the style mask
+        // still says Titled so it keeps its rounded corners, shadow and resize
+        // edges, but the bar itself is transparent, its title hidden and its
+        // separator suppressed.
         //
-        // Compact is keyboard-first with chrome hidden by default, so a
-        // permanent strip of controls over the page works against the whole
-        // premise. ⌘W closes a tab, ⌘Q quits, ⌘H hides, ⌃⌘F is fullscreen.
+        // The buttons are not removed, only hidden — they come back with the
+        // tab chrome. See `sync_window_buttons`.
         window.setTitlebarSeparatorStyle(NSTitlebarSeparatorStyle::None);
-        for b in [
-            NSWindowButton::CloseButton,
-            NSWindowButton::MiniaturizeButton,
-            NSWindowButton::ZoomButton,
-        ] {
+        for b in WINDOW_BUTTONS {
             if let Some(button) = window.standardWindowButton(b) {
                 button.setHidden(true);
+                button.setAlphaValue(0.0);
             }
         }
 
@@ -349,6 +401,7 @@ impl Shell {
             census: compact_mem::WebKitCensus::baseline(),
             self_ref: std::rc::Weak::new(),
             sliding: false,
+            buttons_shown: false,
             pending_focus: None,
             titled: std::collections::HashSet::new(),
         }));
@@ -367,7 +420,9 @@ impl Shell {
             let mut i = inner.borrow_mut();
             let active = i.app.workspaces.current().active;
             let url = i.app.workspaces.current().active_tab().url.clone();
-            i.app.workspaces.set_state(active, compact_core::tab::TabState::Live);
+            i.app
+                .workspaces
+                .set_state(active, compact_core::tab::TabState::Live);
             let mut fx = vec![Effect::Load(active, url)];
             fx.extend(i.app.reconcile());
             i.settle(fx);
@@ -376,7 +431,6 @@ impl Shell {
         install_monitors(&inner);
         install_ticker(&inner);
         install_load_poll(&inner);
-
 
         window.makeKeyAndOrderFront(None);
         ns_app.activate();
@@ -395,8 +449,7 @@ fn point_of(inner: &Inner, event: &NSEvent) -> (f64, f64) {
 fn mods_of(event: &NSEvent) -> Mods {
     let f = event.modifierFlags();
     Mods {
-        cmd: f.contains(NSEventModifierFlags::Command)
-            || f.contains(NSEventModifierFlags::Control),
+        cmd: f.contains(NSEventModifierFlags::Command) || f.contains(NSEventModifierFlags::Control),
         shift: f.contains(NSEventModifierFlags::Shift),
         alt: f.contains(NSEventModifierFlags::Option),
     }
@@ -409,7 +462,8 @@ fn install_monitors(inner: &Rc<RefCell<Inner>>) {
         let event = unsafe { event.as_ref() };
         let mut i = keys.borrow_mut();
 
-        let chars = event.charactersIgnoringModifiers()
+        let chars = event
+            .charactersIgnoringModifiers()
             .map(|s| s.to_string())
             .unwrap_or_default();
         let mods = mods_of(event);
@@ -572,7 +626,10 @@ fn install_monitors(inner: &Rc<RefCell<Inner>>) {
 
         // Clicking anywhere that is not the address bar puts it away. It floats
         // over the page, so it has to leave the moment attention does.
-        let on_address = matches!(hit, Some(Hit::Address) | Some(Hit::Palette) | Some(Hit::ToggleBookmark));
+        let on_address = matches!(
+            hit,
+            Some(Hit::Address) | Some(Hit::Palette) | Some(Hit::ToggleBookmark)
+        );
         if !on_address && i.app.dismiss_address() {
             i.window.makeFirstResponder(None);
             i.render();
@@ -601,10 +658,7 @@ fn install_monitors(inner: &Rc<RefCell<Inner>>) {
 
     unsafe {
         NSEvent::addLocalMonitorForEventsMatchingMask_handler(NSEventMask::KeyDown, &key_block);
-        NSEvent::addLocalMonitorForEventsMatchingMask_handler(
-            NSEventMask::MouseMoved,
-            &move_block,
-        );
+        NSEvent::addLocalMonitorForEventsMatchingMask_handler(NSEventMask::MouseMoved, &move_block);
         NSEvent::addLocalMonitorForEventsMatchingMask_handler(
             NSEventMask::LeftMouseDown,
             &click_block,
@@ -641,7 +695,9 @@ fn install_ticker(inner: &Rc<RefCell<Inner>>) {
             .collect();
         let current_ws = i.app.workspaces.current;
         for (ws, id) in ids {
-            let Some(title) = i.engine.title(id) else { continue };
+            let Some(title) = i.engine.title(id) else {
+                continue;
+            };
             let cur = i
                 .app
                 .workspaces
@@ -732,7 +788,6 @@ fn install_load_poll(inner: &Rc<RefCell<Inner>>) {
     std::mem::forget(block);
 }
 
-
 /// Report memory conditions at startup.
 ///
 /// Deliberately advisory, not a gate. The spike harness refuses to run on a
@@ -801,6 +856,13 @@ fn install_menu(mtm: MainThreadMarker, app: &NSApplication) {
 
     app.setMainMenu(Some(&menubar));
 }
+
+/// The three standard window buttons, in their on-screen order.
+const WINDOW_BUTTONS: [NSWindowButton; 3] = [
+    NSWindowButton::CloseButton,
+    NSWindowButton::MiniaturizeButton,
+    NSWindowButton::ZoomButton,
+];
 
 /// What should receive the keyboard after the next render.
 #[derive(Clone, Copy, PartialEq, Eq)]

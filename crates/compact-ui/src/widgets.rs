@@ -9,14 +9,14 @@ use block2::RcBlock;
 use objc2::rc::Retained;
 use objc2::runtime::AnyObject;
 use objc2::{msg_send, MainThreadMarker, MainThreadOnly};
-use objc2_core_graphics::CGColor;
-use objc2_quartz_core::CAMediaTimingFunction;
 use objc2_app_kit::{
-    NSAnimationContext, NSColor, NSFont, NSTextField, NSView, NSVisualEffectBlendingMode, NSVisualEffectMaterial,
-    NSVisualEffectState, NSVisualEffectView,
+    NSAnimationContext, NSColor, NSFont, NSTextField, NSView, NSVisualEffectBlendingMode,
+    NSVisualEffectMaterial, NSVisualEffectState, NSVisualEffectView,
 };
 use objc2_core_foundation::{CGPoint, CGRect, CGSize};
+use objc2_core_graphics::CGColor;
 use objc2_foundation::{NSNumber, NSString, NSTimer};
+use objc2_quartz_core::CAMediaTimingFunction;
 
 use compact_core::theme::Rgba;
 
@@ -180,10 +180,8 @@ pub fn gradient(frame: CGRect, from: Rgba, to: Rgba) -> Layer {
         let b = cg_color(to);
         // Typed as `id` pointers, not `void*`: `arrayWithObjects:count:`
         // encodes its first argument as `^@` and objc2 checks that at runtime.
-        let ptrs: [*const AnyObject; 2] = [
-            Retained::as_ptr(&a).cast(),
-            Retained::as_ptr(&b).cast(),
-        ];
+        let ptrs: [*const AnyObject; 2] =
+            [Retained::as_ptr(&a).cast(), Retained::as_ptr(&b).cast()];
         let ns = objc2::runtime::AnyClass::get(c"NSArray").expect("NSArray");
         let colors: *mut AnyObject = msg_send![ns, arrayWithObjects: ptrs.as_ptr(), count: 2usize];
         let _: () = msg_send![&*l, setColors: colors];
@@ -337,7 +335,9 @@ pub fn card_transform(size: (f64, f64), dx: f64, degrees: f64, scale: f64) -> [f
     let tx = cx - a * cx - cc * cy + dx;
     let ty = cy - b * cx - d * cy;
     // Column-major, as CATransform3D is laid out in memory.
-    [a, b, 0.0, 0.0, cc, d, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, tx, ty, 0.0, 1.0]
+    [
+        a, b, 0.0, 0.0, cc, d, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, tx, ty, 0.0, 1.0,
+    ]
 }
 
 /// The identity transform.
@@ -411,7 +411,9 @@ pub fn reset_card(host: *mut AnyObject) {
 /// Set a layer's vertical scale about its centre, for the address bar's squash.
 pub fn set_scale_y(l: &Layer, sy: f64) {
     unsafe {
-        let t = [1.0f64, 0.0, 0.0, 0.0, 0.0, sy, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0];
+        let t = [
+            1.0f64, 0.0, 0.0, 0.0, 0.0, sy, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0,
+        ];
         let cls = objc2::runtime::AnyClass::get(c"NSValue").expect("NSValue");
         let v: *mut AnyObject = msg_send![cls,
             valueWithBytes: &t as *const _ as *const c_void,
@@ -450,7 +452,11 @@ pub fn font(size: f64, mono: bool, medium: bool) -> Retained<NSFont> {
 }
 
 /// A blurred backdrop panel — the canvas's `backdrop-filter: blur(...)`.
-pub fn blur_view(mtm: MainThreadMarker, frame: CGRect, radius: f64) -> Retained<NSVisualEffectView> {
+pub fn blur_view(
+    mtm: MainThreadMarker,
+    frame: CGRect,
+    radius: f64,
+) -> Retained<NSVisualEffectView> {
     unsafe {
         let v = NSVisualEffectView::initWithFrame(NSVisualEffectView::alloc(mtm), frame);
         v.setMaterial(NSVisualEffectMaterial::HUDWindow);
@@ -467,7 +473,13 @@ pub fn blur_view(mtm: MainThreadMarker, frame: CGRect, radius: f64) -> Retained<
 }
 
 /// A borderless, transparent editable field — the address bar and palette query.
-pub fn field(mtm: MainThreadMarker, frame: CGRect, size: f64, mono: bool, color: Rgba) -> Retained<NSTextField> {
+pub fn field(
+    mtm: MainThreadMarker,
+    frame: CGRect,
+    size: f64,
+    mono: bool,
+    color: Rgba,
+) -> Retained<NSTextField> {
     unsafe {
         let f = NSTextField::initWithFrame(NSTextField::alloc(mtm), frame);
         f.setBezeled(false);
@@ -520,7 +532,8 @@ pub fn queue_after(delay: f64, f: impl FnOnce() + 'static) {
         }
     });
     unsafe {
-        let t = NSTimer::scheduledTimerWithTimeInterval_repeats_block(delay.max(0.001), false, &block);
+        let t =
+            NSTimer::scheduledTimerWithTimeInterval_repeats_block(delay.max(0.001), false, &block);
         std::mem::forget(t);
     }
     std::mem::forget(block);

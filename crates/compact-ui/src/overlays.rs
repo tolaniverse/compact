@@ -31,7 +31,12 @@ impl Row {
             add_sublayer(&root, l);
         }
         add_sublayer(parent, &root);
-        Self { root, icon, label, hint }
+        Self {
+            root,
+            icon,
+            label,
+            hint,
+        }
     }
 }
 
@@ -73,7 +78,16 @@ impl Card {
             add_sublayer(&root, p);
         }
         add_sublayer(parent, &root);
-        Self { root, dot, name, key, badge, badge_text, count, previews }
+        Self {
+            root,
+            dot,
+            name,
+            key,
+            badge,
+            badge_text,
+            count,
+            previews,
+        }
     }
 }
 
@@ -158,7 +172,12 @@ impl Overlays {
 
         // ---- palette ----
         let (palette, palette_root) = scrim_host(mtm, bg::SCRIM);
-        let palette_panel = panel(zero, bg::PALETTE, radius::PALETTE, Some((border::RAISED, 1.0)));
+        let palette_panel = panel(
+            zero,
+            bg::PALETTE,
+            radius::PALETTE,
+            Some((border::RAISED, 1.0)),
+        );
         add_sublayer(&palette_root, &palette_panel);
         let palette_caret = text("›", 12.0, fg::DIM, false, Align::Center);
         let palette_esc = text("ESC", 10.0, fg::FAINT, true, Align::Right);
@@ -172,11 +191,18 @@ impl Overlays {
 
         // ---- switcher ----
         let (switcher, switcher_root) = scrim_host(mtm, bg::SCRIM_HEAVY);
-        let switcher_label = text("WORKSPACES · ⌘1 – ⌘3", 10.5, Rgba::hex(0x63636D), true, Align::Center);
+        let switcher_label = text(
+            "WORKSPACES · ⌘1 – ⌘3",
+            10.5,
+            Rgba::hex(0x63636D),
+            true,
+            Align::Center,
+        );
         add_sublayer(&switcher_root, &switcher_label);
 
         // ---- shortcuts ----
-        let (keymap, keymap_root) = scrim_host(mtm, Rgba::new(5.0 / 255.0, 5.0 / 255.0, 7.0 / 255.0, 0.70));
+        let (keymap, keymap_root) =
+            scrim_host(mtm, Rgba::new(5.0 / 255.0, 5.0 / 255.0, 7.0 / 255.0, 0.70));
         let keymap_panel = panel(
             zero,
             Rgba::new(20.0 / 255.0, 20.0 / 255.0, 25.0 / 255.0, 0.96),
@@ -185,7 +211,13 @@ impl Overlays {
         );
         add_sublayer(&keymap_root, &keymap_panel);
         let keymap_title = text("Keyboard", 15.0, fg::PRIMARY, false, Align::Left);
-        let keymap_sub = text("everything is remappable", 10.0, fg::DIM, true, Align::Right);
+        let keymap_sub = text(
+            "everything is remappable",
+            10.0,
+            fg::DIM,
+            true,
+            Align::Right,
+        );
         add_sublayer(&keymap_panel, &keymap_title);
         add_sublayer(&keymap_panel, &keymap_sub);
 
@@ -216,8 +248,20 @@ impl Overlays {
         let seg_vert = panel(zero, Rgba::white(0.10), 7.0, None);
         let seg_vert_label = text("Vertical", 12.0, fg::PRIMARY, false, Align::Center);
         let seg_horiz = panel(zero, Rgba::white(0.0), 7.0, None);
-        let seg_horiz_label = text("Horizontal", 12.0, Rgba::hex(0x8A8A94), false, Align::Center);
-        let reveal_head = text("REVEAL DISTANCE", 11.0, Rgba::hex(0x63636D), false, Align::Left);
+        let seg_horiz_label = text(
+            "Horizontal",
+            12.0,
+            Rgba::hex(0x8A8A94),
+            false,
+            Align::Center,
+        );
+        let reveal_head = text(
+            "REVEAL DISTANCE",
+            11.0,
+            Rgba::hex(0x63636D),
+            false,
+            Align::Left,
+        );
         let reveal_value = text("", 10.5, Rgba::hex(0x8A8A94), true, Align::Right);
         let reveal_track = panel(zero, Rgba::white(0.12), 2.0, None);
         let reveal_fill = panel(zero, accent::PRIMARY, 2.0, None);
@@ -232,9 +276,20 @@ impl Overlays {
         let version_label = text("COMPACT 0.1", 10.0, fg::FAINT, true, Align::Left);
         let ram_label = text("", 10.0, fg::FAINT, true, Align::Right);
         for l in [
-            &settings_title, &settings_close, &layout_head, &seg_track, &seg_vert,
-            &seg_horiz, &reveal_head, &reveal_value, &reveal_track, &reveal_fill,
-            &reveal_knob, &reveal_note, &version_label, &ram_label,
+            &settings_title,
+            &settings_close,
+            &layout_head,
+            &seg_track,
+            &seg_vert,
+            &seg_horiz,
+            &reveal_head,
+            &reveal_value,
+            &reveal_track,
+            &reveal_fill,
+            &reveal_knob,
+            &reveal_note,
+            &version_label,
+            &ram_label,
         ] {
             add_sublayer(&settings_root, l);
         }
@@ -242,7 +297,11 @@ impl Overlays {
         add_sublayer(&seg_horiz, &seg_horiz_label);
 
         let mut toggles = Vec::new();
-        for label in ["Pin chrome open", "Smooth motion", "Dim page while chrome is out"] {
+        for label in [
+            "Pin chrome open",
+            "Smooth motion",
+            "Dim page while chrome is out",
+        ] {
             let row = panel(zero, Rgba::white(0.0), 0.0, None);
             let lbl = text(label, 12.5, Rgba::hex(0xC6C6CE), false, Align::Left);
             let track = panel(zero, fill::TRACK_OFF, 10.0, None);
@@ -361,14 +420,20 @@ impl Overlays {
                     let on = i == app.selection;
                     let ry = header + 7.0 + i as f64 * metric::PALETTE_ROW_HEIGHT;
                     set_hidden(&row.root, false);
-                    set_frame(&row.root, rect(7.0, ry, pw - 14.0, metric::PALETTE_ROW_HEIGHT));
+                    set_frame(
+                        &row.root,
+                        rect(7.0, ry, pw - 14.0, metric::PALETTE_ROW_HEIGHT),
+                    );
                     set_fill(&row.root, if on { fill::HOVER } else { Rgba::white(0.0) });
                     set_frame(&row.icon, rect(11.0, 12.0, 16.0, 14.0));
                     set_text(&row.icon, c.icon);
                     set_color(&row.icon, if on { accent::PRIMARY } else { fg::DIM });
                     set_frame(&row.label, rect(38.0, 11.0, pw - 140.0, 16.0));
                     set_text(&row.label, &c.label);
-                    set_color(&row.label, if on { fg::PRIMARY } else { Rgba::hex(0xB4B4BE) });
+                    set_color(
+                        &row.label,
+                        if on { fg::PRIMARY } else { Rgba::hex(0xB4B4BE) },
+                    );
                     set_frame(&row.hint, rect(pw - 90.0, 12.0, 68.0, 13.0));
                     set_text(&row.hint, c.hint);
                 }
@@ -412,14 +477,21 @@ impl Overlays {
                     set_frame(&card.root, rect(x, y, cw, ch));
                     set_border(
                         &card.root,
-                        if on { border::CARD_ACTIVE } else { border::CARD },
+                        if on {
+                            border::CARD_ACTIVE
+                        } else {
+                            border::CARD
+                        },
                         1.0,
                     );
                     rotate(&card.root, if on { 0.0 } else { tilts[i % 3].to_radians() });
                     set_fill(&card.dot, ws.dot);
                     set_frame(&card.name, rect(31.0, 16.0, cw - 110.0, 17.0));
                     set_text(&card.name, &ws.name);
-                    set_color(&card.name, if on { fg::PRIMARY } else { Rgba::hex(0xA6A6B0) });
+                    set_color(
+                        &card.name,
+                        if on { fg::PRIMARY } else { Rgba::hex(0xA6A6B0) },
+                    );
                     set_frame(&card.key, rect(cw - 46.0, 17.0, 30.0, 14.0));
                     set_text(&card.key, &format!("⌘{}", i + 1));
 
@@ -437,7 +509,10 @@ impl Overlays {
                     // ~240 KB each — a hundred times a hibernated tab.
                     for (j, p) in card.previews.iter().enumerate() {
                         let widths = [0.86, 0.64, 0.72];
-                        set_frame(&p, rect(16.0, 96.0 + j as f64 * 13.0, (cw - 32.0) * widths[j], 7.0));
+                        set_frame(
+                            &p,
+                            rect(16.0, 96.0 + j as f64 * 13.0, (cw - 32.0) * widths[j], 7.0),
+                        );
                     }
                     set_frame(&card.count, rect(16.0, ch - 26.0, 120.0, 13.0));
                     set_text(&card.count, &ws.count_label());
@@ -518,7 +593,10 @@ impl Overlays {
         set_frame(&self.settings_edge, rect(0.0, 0.0, 1.0, h));
         let pad = 24.0;
         set_frame(&self.settings_title, rect(pad, 26.0, 200.0, 20.0));
-        set_frame(&self.settings_close, rect(sw - pad - 60.0, 30.0, 60.0, 14.0));
+        set_frame(
+            &self.settings_close,
+            rect(sw - pad - 60.0, 30.0, 60.0, 14.0),
+        );
 
         set_frame(&self.layout_head, rect(pad, 78.0, 200.0, 14.0));
         let seg_y = 98.0;
@@ -528,12 +606,43 @@ impl Overlays {
         let vertical = app.chrome.layout == TabLayout::Vertical;
         set_frame(&self.seg_vert, rect(pad + 3.0, seg_y + 3.0, half, 31.0));
         set_frame(&self.seg_vert_label, rect(0.0, 8.0, half, 16.0));
-        set_fill(&self.seg_vert, if vertical { Rgba::white(0.10) } else { Rgba::white(0.0) });
-        set_color(&self.seg_vert_label, if vertical { fg::PRIMARY } else { Rgba::hex(0x8A8A94) });
-        set_frame(&self.seg_horiz, rect(pad + 9.0 + half, seg_y + 3.0, half, 31.0));
+        set_fill(
+            &self.seg_vert,
+            if vertical {
+                Rgba::white(0.10)
+            } else {
+                Rgba::white(0.0)
+            },
+        );
+        set_color(
+            &self.seg_vert_label,
+            if vertical {
+                fg::PRIMARY
+            } else {
+                Rgba::hex(0x8A8A94)
+            },
+        );
+        set_frame(
+            &self.seg_horiz,
+            rect(pad + 9.0 + half, seg_y + 3.0, half, 31.0),
+        );
         set_frame(&self.seg_horiz_label, rect(0.0, 8.0, half, 16.0));
-        set_fill(&self.seg_horiz, if vertical { Rgba::white(0.0) } else { Rgba::white(0.10) });
-        set_color(&self.seg_horiz_label, if vertical { Rgba::hex(0x8A8A94) } else { fg::PRIMARY });
+        set_fill(
+            &self.seg_horiz,
+            if vertical {
+                Rgba::white(0.0)
+            } else {
+                Rgba::white(0.10)
+            },
+        );
+        set_color(
+            &self.seg_horiz_label,
+            if vertical {
+                Rgba::hex(0x8A8A94)
+            } else {
+                fg::PRIMARY
+            },
+        );
 
         let rv_y = 168.0;
         set_frame(&self.reveal_head, rect(pad, rv_y, 200.0, 14.0));
@@ -542,13 +651,21 @@ impl Overlays {
         let track_w = sw - pad * 2.0;
         set_frame(&self.reveal_track, rect(pad, track_y, track_w, 4.0));
         let t = (app.chrome.threshold - compact_core::chrome::REVEAL_THRESHOLD_MIN)
-            / (compact_core::chrome::REVEAL_THRESHOLD_MAX - compact_core::chrome::REVEAL_THRESHOLD_MIN);
+            / (compact_core::chrome::REVEAL_THRESHOLD_MAX
+                - compact_core::chrome::REVEAL_THRESHOLD_MIN);
         set_frame(&self.reveal_fill, rect(pad, track_y, track_w * t, 4.0));
-        set_frame(&self.reveal_knob, rect(pad + track_w * t - 7.0, track_y - 5.0, 14.0, 14.0));
+        set_frame(
+            &self.reveal_knob,
+            rect(pad + track_w * t - 7.0, track_y - 5.0, 14.0, 14.0),
+        );
         set_text(&self.reveal_value, &app.chrome.threshold_label());
         set_frame(&self.reveal_note, rect(pad, track_y + 16.0, track_w, 32.0));
 
-        let vals = [app.chrome.pinned, app.chrome.smooth_motion, app.chrome.dim_page];
+        let vals = [
+            app.chrome.pinned,
+            app.chrome.smooth_motion,
+            app.chrome.dim_page,
+        ];
         let ty0 = track_y + 62.0;
         for (i, (row, lbl, track, knob)) in self.toggles.iter().enumerate() {
             let y = ty0 + i as f64 * 44.0;
@@ -565,7 +682,10 @@ impl Overlays {
         }
 
         set_frame(&self.version_label, rect(pad, h - 34.0, 140.0, 13.0));
-        set_frame(&self.ram_label, rect(sw - pad - 140.0, h - 34.0, 140.0, 13.0));
+        set_frame(
+            &self.ram_label,
+            rect(sw - pad - 140.0, h - 34.0, 140.0, 13.0),
+        );
         set_text(&self.ram_label, &app.memory_label());
     }
 
@@ -670,8 +790,7 @@ fn rotate(l: &Layer, radians: f64) {
         let cls = objc2::runtime::AnyClass::get(c"NSValue").expect("NSValue");
         // CATransform3DMakeRotation about the z axis.
         let t = ca_rotation_z(radians);
-        let v: *mut objc2::runtime::AnyObject =
-            msg_send![cls, valueWithBytes: &t as *const _ as *const std::ffi::c_void,
+        let v: *mut objc2::runtime::AnyObject = msg_send![cls, valueWithBytes: &t as *const _ as *const std::ffi::c_void,
                            objCType: c"{CATransform3D=dddddddddddddddd}".as_ptr()];
         let _: () = msg_send![&**l, setValue: v, forKeyPath: &*objc2_foundation::NSString::from_str("transform")];
     }
@@ -680,5 +799,7 @@ fn rotate(l: &Layer, radians: f64) {
 /// Column-major 4x4 rotation about z, matching `CATransform3D`.
 fn ca_rotation_z(a: f64) -> [f64; 16] {
     let (s, c) = a.sin_cos();
-    [c, s, 0.0, 0.0, -s, c, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0]
+    [
+        c, s, 0.0, 0.0, -s, c, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0,
+    ]
 }
