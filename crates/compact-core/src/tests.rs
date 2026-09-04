@@ -872,8 +872,70 @@ fn progress_is_reported_only_while_loading() {
     assert_eq!(app.load_progress(), None, "an idle tab shows no bar");
     app.record_progress(id, true, 0.4);
     assert_eq!(app.load_progress(), Some(0.4));
+}
+
+#[test]
+fn a_starting_navigation_is_visible_immediately() {
+    // WebKit reports 0 for the first moments of a load, and a bar of zero
+    // width is indistinguishable from no bar — clicking a link would look
+    // like nothing happened.
+    let mut app = App::new();
+    let id = app.workspaces.current().active;
+    app.record_progress(id, true, 0.0);
+    assert_eq!(app.load_progress(), Some(crate::MIN_VISIBLE_PROGRESS));
+}
+
+#[test]
+fn the_bar_holds_at_full_before_it_leaves() {
+    // Most navigations finish faster than the eye resolves; without the hold
+    // the bar appears and disappears as a flicker.
+    let mut app = App::new();
+    let id = app.workspaces.current().active;
+    app.clock = 10_000;
+    app.record_progress(id, true, 0.6);
     app.record_progress(id, false, 1.0);
-    assert_eq!(app.load_progress(), None, "the bar goes when the load finishes");
+    assert_eq!(app.load_progress(), Some(1.0), "completes rather than vanishing");
+
+    app.clock = 10_000 + crate::LOAD_FINISH_HOLD_MS - 1;
+    assert_eq!(app.load_progress(), Some(1.0), "still held");
+    app.clock = 10_000 + crate::LOAD_FINISH_HOLD_MS;
+    assert_eq!(app.load_progress(), None, "gone once the hold elapses");
+}
+
+#[test]
+fn an_idle_tab_stops_asking_for_redraws() {
+    // The load poll runs at 12 Hz. If a settled tab keeps reporting a change,
+    // the whole chrome redraws forever — the opposite of the point.
+    let mut app = App::new();
+    let id = app.workspaces.current().active;
+    app.clock = 1_000;
+    app.record_progress(id, true, 0.5);
+    app.record_progress(id, false, 1.0);
+
+    app.clock = 1_000 + crate::LOAD_FINISH_HOLD_MS;
+    assert!(app.record_progress(id, false, 1.0), "one last redraw to fade out");
+    for _ in 0..5 {
+        app.clock += 80;
+        assert!(
+            !app.record_progress(id, false, 1.0),
+            "a settled tab must report no change"
+        );
+    }
+}
+
+#[test]
+fn a_new_navigation_cancels_a_pending_hold() {
+    // Clicking a second link during the hold must restart the bar, not leave
+    // it sitting at full.
+    let mut app = App::new();
+    let id = app.workspaces.current().active;
+    app.clock = 5_000;
+    app.record_progress(id, true, 0.9);
+    app.record_progress(id, false, 1.0);
+    app.record_progress(id, true, 0.1);
+    assert_eq!(app.load_progress(), Some(0.1));
+    app.clock = 5_000 + crate::LOAD_FINISH_HOLD_MS * 2;
+    assert_eq!(app.load_progress(), Some(0.1), "the stale hold does not expire it");
 }
 
 #[test]

@@ -91,6 +91,11 @@ pub struct TabMeta {
     /// canvas's scripted 0 → 62 → 100 timeline, which exists only because a
     /// static mock has no page to report on.
     pub progress: f64,
+    /// When the last navigation finished, in monotonic milliseconds.
+    ///
+    /// The bar holds at full for a moment afterwards rather than vanishing, so
+    /// a fast load reads as *completed* rather than as a flicker.
+    pub completed_at: Option<u64>,
 }
 
 /// Fallback per-live-tab cost when measurement has not run yet.
@@ -114,6 +119,7 @@ impl TabMeta {
             footprint: None,
             loading: false,
             progress: 0.0,
+            completed_at: None,
         }
     }
 

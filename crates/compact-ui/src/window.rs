@@ -32,7 +32,7 @@ use compact_mem::{Guard, PressureMonitor};
 
 use crate::chrome::{Chrome, Hit};
 use crate::overlays::{Overlays, SettingsHit};
-use crate::widgets::{animate_with, rect, without_animation};
+use crate::widgets::{animate_with, queue_after, rect, without_animation};
 
 struct Inner {
     app: App,
@@ -351,6 +351,7 @@ impl Shell {
 
         install_monitors(&inner);
         install_ticker(&inner);
+        install_load_poll(&inner);
 
 
         window.makeKeyAndOrderFront(None);
@@ -653,14 +654,6 @@ fn install_ticker(inner: &Rc<RefCell<Inner>>) {
             dirty = true;
         }
 
-        // Real navigation progress for the visible tab, straight from WebKit.
-        let active = i.app.workspaces.current().active;
-        if let Some((loading, progress)) = i.engine.load_state(active) {
-            if i.app.record_progress(active, loading, progress) {
-                dirty = true;
-            }
-        }
-
         if let Some(cell) = &i.pressure {
             let p = cell.get();
             if p != i.app.pressure {
@@ -681,20 +674,37 @@ fn install_ticker(inner: &Rc<RefCell<Inner>>) {
     std::mem::forget(block);
 }
 
-/// Run `f` on the main queue after `delay` seconds.
-fn queue_after(delay: f64, f: impl FnOnce() + 'static) {
-    let cell = RefCell::new(Some(f));
+/// Watch the visible tab's navigation.
+///
+/// Separate from the housekeeping tick, and much faster. Housekeeping is
+/// title-following and memory sampling, where one second is generous; a
+/// navigation is over in a few hundred milliseconds, so at 1 Hz the load bar
+/// was usually never sampled while a page was actually loading — clicking a
+/// link looked like nothing had happened.
+///
+/// 12 Hz is a compromise: fast enough that the bar appears within a frame or
+/// two of a click, cheap enough to leave running. Each tick is two ObjC
+/// property reads, and it redraws only when something moved.
+fn install_load_poll(inner: &Rc<RefCell<Inner>>) {
+    let poll = inner.clone();
     let block = RcBlock::new(move |_t: NonNull<NSTimer>| {
-        if let Some(f) = cell.borrow_mut().take() {
-            f();
+        let mut i = poll.borrow_mut();
+        i.app.clock = i.now_ms();
+        let active = i.app.workspaces.current().active;
+        let Some((loading, progress)) = i.engine.load_state(active) else {
+            return;
+        };
+        if i.app.record_progress(active, loading, progress) {
+            i.render();
         }
     });
     unsafe {
-        let t = NSTimer::scheduledTimerWithTimeInterval_repeats_block(delay.max(0.001), false, &block);
+        let t = NSTimer::scheduledTimerWithTimeInterval_repeats_block(0.08, true, &block);
         std::mem::forget(t);
     }
     std::mem::forget(block);
 }
+
 
 /// Report memory conditions at startup.
 ///

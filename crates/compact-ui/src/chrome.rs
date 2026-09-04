@@ -132,6 +132,9 @@ pub struct Chrome {
     pub progress: Retained<NSView>,
     progress_root: Layer,
     progress_fill: Layer,
+    /// Whether the bar is currently shown, so the fade runs once per load
+    /// rather than on every poll tick.
+    progress_visible: bool,
 
     // Address bar.
     pub address: Retained<NSVisualEffectView>,
@@ -337,6 +340,7 @@ impl Chrome {
             progress,
             progress_root,
             progress_fill,
+            progress_visible: false,
             address_root,
             address_icon,
             address_star,
@@ -526,17 +530,32 @@ impl Chrome {
     /// The 2 px load bar across the top of the window.
     fn sync_progress(&mut self, app: &App, w: f64, h: f64) {
         let Some(p) = app.load_progress() else {
-            self.progress.setHidden(true);
-            // Reset so the next navigation grows from the left rather than
+            // Fade out rather than vanish, then reset to zero width behind the
+            // fade so the next navigation grows from the left instead of
             // continuing from wherever the last one stopped.
-            without_animation(|| set_frame(&self.progress_fill, rect(0.0, 0.0, 0.0, 2.0)));
+            if !self.progress_visible {
+                return;
+            }
+            self.progress_visible = false;
+            animated(compact_core::theme::duration::ADDRESS_FADE, || {
+                set_opacity(&self.progress_fill, 0.0);
+            });
+            let fill = self.progress_fill.clone();
+            queue_after(compact_core::theme::duration::ADDRESS_FADE, move || {
+                without_animation(|| set_frame(&fill, rect(0.0, 0.0, 0.0, 2.0)));
+            });
             return;
         };
+
         self.progress.setHidden(false);
         self.progress.setFrame(rect(0.0, h - 2.0, w, 2.0));
         set_frame(&self.progress_root, rect(0.0, 0.0, w, 2.0));
+        if !self.progress_visible {
+            self.progress_visible = true;
+            without_animation(|| set_opacity(&self.progress_fill, 1.0));
+        }
         // The canvas snaps the final stretch — a completed load should not
-        // appear to keep working.
+        // appear to still be working.
         let dur = if p >= 0.999 { 0.2 } else { 0.55 };
         animated(dur, || {
             set_frame(&self.progress_fill, rect(0.0, 0.0, w * p, 2.0));

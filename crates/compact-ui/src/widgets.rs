@@ -1,6 +1,10 @@
 //! Thin constructors over CALayer and AppKit, in the design's vocabulary.
 
+use std::cell::RefCell;
 use std::ffi::c_void;
+use std::ptr::NonNull;
+
+use block2::RcBlock;
 
 use objc2::rc::Retained;
 use objc2::runtime::AnyObject;
@@ -12,7 +16,7 @@ use objc2_app_kit::{
     NSVisualEffectState, NSVisualEffectView,
 };
 use objc2_core_foundation::{CGPoint, CGRect, CGSize};
-use objc2_foundation::{NSNumber, NSString};
+use objc2_foundation::{NSNumber, NSString, NSTimer};
 
 use compact_core::theme::Rgba;
 
@@ -414,4 +418,19 @@ pub fn set_host_border(host: *mut AnyObject, c: Rgba, w: f64) {
         let _: () = msg_send![host, setBorderColor: &*c];
         let _: () = msg_send![host, setBorderWidth: w];
     }
+}
+
+/// Run `f` on the main queue after `delay` seconds.
+pub fn queue_after(delay: f64, f: impl FnOnce() + 'static) {
+    let cell = RefCell::new(Some(f));
+    let block = RcBlock::new(move |_t: NonNull<NSTimer>| {
+        if let Some(f) = cell.borrow_mut().take() {
+            f();
+        }
+    });
+    unsafe {
+        let t = NSTimer::scheduledTimerWithTimeInterval_repeats_block(delay.max(0.001), false, &block);
+        std::mem::forget(t);
+    }
+    std::mem::forget(block);
 }

@@ -69,6 +69,11 @@ pub enum Effect {
     SlideWorkspace(i8),
 }
 
+/// Floor for a freshly-started navigation, so the bar is visible immediately.
+pub const MIN_VISIBLE_PROGRESS: f64 = 0.08;
+/// How long the bar stays at full after a load completes.
+pub const LOAD_FINISH_HOLD_MS: u64 = 420;
+
 /// Where an address-bar entry points.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Target {
@@ -268,10 +273,27 @@ impl App {
         if self.is_bookmarked() { "★" } else { "☆" }
     }
 
-    /// Load progress of the active tab, if a navigation is in flight.
+    /// What the load bar should show for the active tab, if anything.
+    ///
+    /// Two departures from raw `estimatedProgress`, both about the bar being
+    /// believable rather than merely accurate:
+    ///
+    /// - It never starts below [`MIN_VISIBLE_PROGRESS`]. WebKit reports 0 for
+    ///   the first moments of a navigation, and a bar of zero width is
+    ///   indistinguishable from no bar — so clicking a link would look like
+    ///   nothing happened.
+    /// - It holds at full for [`LOAD_FINISH_HOLD_MS`] after the load ends.
+    ///   Most navigations finish faster than the eye resolves; without the hold
+    ///   the bar appears and disappears as a flicker.
     pub fn load_progress(&self) -> Option<f64> {
         let t = self.workspaces.current().active_tab();
-        t.loading.then_some(t.progress)
+        if t.loading {
+            return Some(t.progress.max(MIN_VISIBLE_PROGRESS));
+        }
+        match t.completed_at {
+            Some(at) if self.clock.saturating_sub(at) < LOAD_FINISH_HOLD_MS => Some(1.0),
+            _ => None,
+        }
     }
 
     pub fn memory(&self) -> MemoryReport {
@@ -563,12 +585,35 @@ impl App {
     // ---- memory -------------------------------------------------------------
 
     /// Record navigation progress reported by the engine.
+    ///
+    /// Returns whether anything worth redrawing changed.
     pub fn record_progress(&mut self, id: TabId, loading: bool, progress: f64) -> bool {
+        let now = self.clock;
         for w in &mut self.workspaces.spaces {
             if let Some(t) = w.tab_mut(id) {
                 let changed = t.loading != loading || (t.progress - progress).abs() > 0.01;
+                if t.loading && !loading {
+                    // Falling edge: start the hold that lets a fast load be seen.
+                    t.completed_at = Some(now);
+                } else if !t.loading && loading {
+                    t.completed_at = None;
+                }
                 t.loading = loading;
                 t.progress = progress;
+
+                // The completion hold is the only state that changes without
+                // the engine reporting anything, so it has to be aged here —
+                // and, crucially, retired. Leaving `completed_at` set forever
+                // makes this return true on every poll, which pins the whole
+                // chrome to a 12 Hz redraw for the life of the process.
+                if let Some(at) = t.completed_at {
+                    if now.saturating_sub(at) >= LOAD_FINISH_HOLD_MS {
+                        t.completed_at = None;
+                        // One last redraw, to run the fade out.
+                        return true;
+                    }
+                    return true;
+                }
                 return changed;
             }
         }
