@@ -152,6 +152,13 @@ pub mod metric {
     pub const WS_CARD_HEIGHT: f64 = 172.0;
 }
 
+/// The canvas's shared easing curve, `cubic-bezier(.16, 1, .3, 1)`.
+///
+/// A hard decelerate: chrome leaves fast and settles slowly. Using a default
+/// ease-in-ease-out here is immediately noticeable — the motion reads soft and
+/// laggy rather than snapping into place.
+pub const EASE_OUT_EXPO: [f32; 4] = [0.16, 1.0, 0.3, 1.0];
+
 /// Animation durations, in seconds, matching the canvas transitions.
 pub mod duration {
     /// Sidebar / strip tear-in.
@@ -165,6 +172,19 @@ pub mod duration {
     pub const SLIDE_IN: f64 = 0.50;
     /// Hover tint.
     pub const HOVER: f64 = 0.16;
+    /// Chrome opacity fade — shorter than the slide, so chrome is fully opaque
+    /// before it finishes travelling.
+    pub const CHROME_FADE: f64 = 0.26;
+    /// Address bar opacity fade.
+    pub const ADDRESS_FADE: f64 = 0.30;
+    /// Settings drawer slide.
+    pub const DRAWER: f64 = 0.46;
+    /// Toggle knob travel.
+    pub const TOGGLE: f64 = 0.22;
+    /// Workspace card hover lift.
+    pub const CARD: f64 = 0.30;
+    /// Hint breathing cycle.
+    pub const BREATHE: f64 = 3.4;
     /// Toast lifetime before auto-dismiss.
     pub const TOAST_LIFETIME: f64 = 7.0;
 }

@@ -7,7 +7,7 @@
 
 use objc2::rc::Retained;
 use objc2::MainThreadMarker;
-use objc2_app_kit::{NSTextField, NSView, NSVisualEffectView};
+use objc2_app_kit::{NSAnimatablePropertyContainer, NSTextField, NSView, NSVisualEffectView};
 use objc2_core_foundation::CGRect;
 
 use compact_core::theme::{accent, bg, border, fg, fill, metric, radius, Rgba};
@@ -72,6 +72,8 @@ impl Toast {
 
 pub struct Chrome {
     size: (f64, f64),
+    /// What the cursor is currently over, for hover tinting.
+    hover: Option<Hit>,
     /// Last visibility pushed to the layers.
     ///
     /// Chrome position animates, but content does not: a tab title must not
@@ -138,6 +140,25 @@ fn host(mtm: MainThreadMarker, frame: CGRect) -> (Retained<NSView>, Layer) {
     }
     set_view_layer(&v, &root);
     (v, root)
+}
+
+/// Move a chrome panel to `frame`, fading it as it goes.
+///
+/// Position and opacity run on different clocks by design: chrome reaches full
+/// opacity well before it stops travelling, so it is readable the moment it is
+/// worth reading. Hidden panels keep their frame set rather than being
+/// `setHidden`, so there is something to animate *from* next time.
+fn slide(view: &NSVisualEffectView, frame: CGRect, visible: bool, travel: f64, fade: f64, motion: bool) {
+    let alpha = if visible { 1.0 } else { 0.0 };
+    if motion {
+        animate(travel, || view.animator().setFrame(frame));
+        animate(fade, || view.animator().setAlphaValue(alpha));
+    } else {
+        without_animation(|| {
+            view.setFrame(frame);
+            view.setAlphaValue(alpha);
+        });
+    }
 }
 
 /// A view's backing layer, as the untyped pointer AppKit hands back.
@@ -222,12 +243,16 @@ impl Chrome {
         let hint_keys = text("? shortcuts", 10.0, Rgba::hex(0x5A5A64), true, Align::Left);
         add_sublayer(&hint_bg, &hint_text);
         add_sublayer(&hint_bg, &hint_keys);
+        // `cpBreathe`: the prompt pulses so it reads as a live hint rather than
+        // a static label the eye stops seeing.
+        breathe(&hint_text, 0.34, 0.62, compact_core::theme::duration::BREATHE);
 
         // ---- toasts ----
         let (toast_host, toast_root) = host(mtm, zero);
 
         Self {
             size,
+            hover: None,
             last_vis: None,
             sidebar,
             sidebar_root,
@@ -283,6 +308,27 @@ impl Chrome {
         self.size = size;
     }
 
+    /// Update what the cursor is over. Returns true if it changed.
+    pub fn set_hover(&mut self, h: Option<Hit>) -> bool {
+        let changed = self.hover != h;
+        self.hover = h;
+        changed
+    }
+
+    /// Background tint for a row, given whether it is active and hovered.
+    ///
+    /// Hover only reads on inactive rows — tinting an already-tinted active row
+    /// makes the selection ambiguous rather than responsive.
+    fn row_fill(&self, active: bool, hovered: bool) -> Rgba {
+        if active {
+            fill::TAB_ACTIVE
+        } else if hovered {
+            fill::HOVER
+        } else {
+            Rgba::white(0.0)
+        }
+    }
+
     /// Push the whole of `app` into the layer tree.
     pub fn sync(&mut self, app: &App, now: u64) {
         let (w, h) = self.size;
@@ -293,16 +339,7 @@ impl Chrome {
 
         // The canvas tears chrome in over 0.44 s; honour that only when
         // visibility actually changed, and only when the user wants motion.
-        let animate = moved && cfg.smooth_motion;
-
-        // Chrome geometry: animated when visibility flipped, instant otherwise.
-        let place = |f: &dyn Fn()| {
-            if animate {
-                animated(compact_core::theme::duration::CHROME, f)
-            } else {
-                without_animation(f)
-            }
-        };
+        let motion = moved && cfg.smooth_motion;
 
         let sw = metric::SIDEBAR_WIDTH;
         let sh = metric::STRIP_HEIGHT;
@@ -310,34 +347,50 @@ impl Chrome {
         let ah = metric::ADDRESS_HEIGHT;
         let ax = (w - aw) / 2.0;
         let atop = vis.address_top();
-        {
-            let sidebar = &self.sidebar;
-            let strip = &self.strip;
-            let address = &self.address;
-            place(&|| {
-                // Sidebar slides in from the left edge.
-                sidebar.setFrame(rect(if vis.sidebar { 0.0 } else { -sw - 4.0 }, 0.0, sw, h));
-                // Strip drops down from the top edge.
-                strip.setFrame(rect(0.0, if vis.strip { h - sh } else { h + 4.0 }, w, sh));
-                // Address bar tears off from above the window edge.
-                address.setFrame(rect(
-                    ax,
-                    if vis.address { h - atop - ah } else { h + ah },
-                    aw,
-                    ah,
-                ));
-            });
+        use compact_core::theme::duration as dur;
+
+        // Sidebar slides in from the left edge.
+        slide(
+            &self.sidebar,
+            rect(if vis.sidebar { 0.0 } else { -sw - 4.0 }, 0.0, sw, h),
+            vis.sidebar,
+            dur::CHROME,
+            dur::CHROME_FADE,
+            motion,
+        );
+        // Strip drops down from the top edge.
+        slide(
+            &self.strip,
+            rect(0.0, if vis.strip { h - sh } else { h + 4.0 }, w, sh),
+            vis.strip,
+            dur::CHROME,
+            dur::CHROME_FADE,
+            motion,
+        );
+        // Address bar tears off from above the window edge, on its own longer
+        // curve — the canvas gives it .52s against the chrome's .44s.
+        slide(
+            &self.address,
+            rect(ax, if vis.address { h - atop - ah } else { h + ah }, aw, ah),
+            vis.address,
+            dur::ADDRESS,
+            dur::ADDRESS_FADE,
+            motion,
+        );
+        // ...and squashes vertically while it is away (`scaleY(.86)`), which is
+        // what makes it read as torn off rather than merely moved.
+        let squash = |l: &Layer| set_scale_y(l, if vis.address { 1.0 } else { 0.86 });
+        if motion {
+            animated(dur::ADDRESS, || squash(&self.address_root));
+        } else {
+            without_animation(|| squash(&self.address_root));
         }
 
         without_animation(|| {
-            self.sidebar.setHidden(!vis.sidebar);
             set_frame(&self.sidebar_root, rect(0.0, 0.0, sw, h));
             set_host_fill(host_layer(&*self.sidebar), bg::SIDEBAR);
 
-            self.strip.setHidden(!vis.strip);
             set_frame(&self.strip_root, rect(0.0, 0.0, w, sh));
-
-            self.address.setHidden(!vis.address);
             set_frame(&self.address_root, rect(0.0, 0.0, aw, ah));
             set_host_fill(host_layer(&*self.address), bg::RAISED);
             set_host_border(host_layer(&*self.address), border::RAISED, 1.0);
@@ -388,9 +441,12 @@ impl Chrome {
             }
             let t = &ws.tabs[i];
             let on = t.id == ws.active;
+            let hovered = matches!(self.hover, Some(Hit::SelectTab(h) | Hit::CloseTab(h)) if h == t.id);
             set_hidden(&row.root, false);
             set_frame(&row.root, rect(10.0, y, inner, rh));
-            set_fill(&row.root, if on { fill::TAB_ACTIVE } else { Rgba::white(0.0) });
+            animated(compact_core::theme::duration::HOVER, || {
+                set_fill(&row.root, self.row_fill(on, hovered));
+            });
             set_border(&row.root, if on { border::TAB_ACTIVE } else { Rgba::white(0.0) }, 1.0);
             set_frame(&row.dot, rect(9.0, (rh - 5.0) / 2.0, 5.0, 5.0));
             set_fill(&row.dot, if on { ws.dot } else { fill::INACTIVE_DOT });
@@ -445,6 +501,11 @@ impl Chrome {
 
         // New tab + footer.
         set_frame(&self.side_new_tab, rect(10.0, new_tab_y, inner, 32.0));
+        animated(compact_core::theme::duration::HOVER, || {
+            set_fill(&self.side_new_tab, self.row_fill(false, self.hover == Some(Hit::NewTab)));
+            set_fill(&self.side_layout_btn, self.row_fill(false, self.hover == Some(Hit::ToggleLayout)));
+            set_fill(&self.side_gear, self.row_fill(false, self.hover == Some(Hit::Settings)));
+        });
         set_frame(&self.side_new_label, rect(20.0, new_tab_y + 8.0, inner - 60.0, 16.0));
         set_frame(&self.side_new_hint, rect(sw - 50.0, new_tab_y + 9.0, 30.0, 14.0));
 
@@ -477,10 +538,13 @@ impl Chrome {
             }
             let t = &ws.tabs[i];
             let on = t.id == ws.active;
+            let hovered = matches!(self.hover, Some(Hit::SelectTab(h) | Hit::CloseTab(h)) if h == t.id);
             let x = left + i as f64 * (tw + 8.0);
             set_hidden(&row.root, false);
             set_frame(&row.root, rect(x, y, tw, rh));
-            set_fill(&row.root, if on { fill::TAB_ACTIVE } else { Rgba::white(0.0) });
+            animated(compact_core::theme::duration::HOVER, || {
+                set_fill(&row.root, self.row_fill(on, hovered));
+            });
             set_border(&row.root, if on { border::TAB_ACTIVE } else { Rgba::white(0.0) }, 1.0);
             set_frame(&row.dot, rect(9.0, (rh - 5.0) / 2.0, 5.0, 5.0));
             set_fill(&row.dot, if on { ws.dot } else { fill::INACTIVE_DOT });

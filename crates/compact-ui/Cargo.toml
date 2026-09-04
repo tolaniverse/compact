@@ -12,6 +12,7 @@ compact-mem = { workspace = true }
 objc2 = { workspace = true }
 objc2-core-foundation = { workspace = true }
 objc2-core-graphics = { workspace = true, features = ["CGColor"] }
+objc2-quartz-core = { workspace = true, features = ["CAMediaTimingFunction", "CAAnimation", "CALayer", "CATransaction", "CAMediaTiming"] }
 block2 = { workspace = true }
 objc2-foundation = { workspace = true, features = [
   "NSString", "NSGeometry", "NSValue", "NSDictionary", "NSArray",
@@ -25,4 +26,5 @@ objc2-app-kit = { workspace = true, features = [
   "NSCell", "NSActionCell", "NSAttributedString", "NSStringDrawing",
   "NSParagraphStyle", "NSLayoutConstraint", "NSAppearance", "NSImage",
   "NSMenu", "NSMenuItem", "NSPasteboard", "NSSlider",
+  "NSAnimationContext", "NSAnimation", "objc2-quartz-core",
 ] }

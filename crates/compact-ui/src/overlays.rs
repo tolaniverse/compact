@@ -6,7 +6,7 @@
 
 use objc2::rc::Retained;
 use objc2::MainThreadMarker;
-use objc2_app_kit::{NSTextField, NSView};
+use objc2_app_kit::{NSAnimatablePropertyContainer, NSTextField, NSView};
 
 use compact_core::command::SHORTCUTS;
 use compact_core::theme::{accent, bg, border, fg, fill, metric, radius, Rgba};
@@ -79,6 +79,10 @@ impl Card {
 
 pub struct Overlays {
     size: (f64, f64),
+    /// Last drawer state pushed, so the slide animates on the transition only.
+    drawer_open: Option<bool>,
+    /// Whether the user wants motion at all.
+    pub motion: bool,
 
     // Command palette.
     pub palette: Retained<NSView>,
@@ -252,6 +256,8 @@ impl Overlays {
 
         Self {
             size: (0.0, 0.0),
+            drawer_open: None,
+            motion: true,
             palette,
             palette_root,
             palette_panel,
@@ -311,8 +317,11 @@ impl Overlays {
             self.sync_palette(app, w, h);
             self.sync_switcher(app, w, h);
             self.sync_keymap(app, w, h);
-            self.sync_settings(app, w, h);
         });
+        // Outside the suppression block: the drawer slide and the toggle knobs
+        // are transitions the design asks for, not state sync.
+        self.motion = app.chrome.smooth_motion;
+        self.sync_settings(app, w, h);
     }
 
     fn sync_palette(&mut self, app: &App, w: f64, h: f64) {
@@ -486,11 +495,22 @@ impl Overlays {
     fn sync_settings(&mut self, app: &App, w: f64, h: f64) {
         let open = app.overlay == Overlay::Settings;
         let sw = metric::SETTINGS_WIDTH;
-        // Drawer slides in from the right rather than being hidden outright, so
-        // the transition has somewhere to come from.
+        // Slides in from the right rather than being hidden outright, so the
+        // transition has somewhere to come from. `translateX(101%)` in the
+        // canvas — just past the edge, so the shadow clears too.
         let x = if open { w - sw } else { w + 4.0 };
-        self.settings.setHidden(!open);
-        self.settings.setFrame(rect(x, 0.0, sw, h));
+        let changed = self.drawer_open != Some(open);
+        self.drawer_open = Some(open);
+
+        // Stay mounted while closed: a `setHidden` view cannot animate out.
+        self.settings.setHidden(false);
+        if changed && self.motion {
+            animate(compact_core::theme::duration::DRAWER, || {
+                self.settings.animator().setFrame(rect(x, 0.0, sw, h))
+            });
+        } else {
+            without_animation(|| self.settings.setFrame(rect(x, 0.0, sw, h)));
+        }
         set_frame(&self.settings_root, rect(0.0, 0.0, sw, h));
         if !open {
             return;
@@ -536,8 +556,12 @@ impl Overlays {
             set_frame(lbl, rect(0.0, 14.0, sw - pad * 2.0 - 50.0, 16.0));
             let on = vals[i];
             set_frame(track, rect(sw - pad * 2.0 - 36.0, 12.0, 36.0, 20.0));
-            set_fill(track, if on { accent::PRIMARY } else { fill::TRACK_OFF });
-            set_frame(knob, rect(if on { 18.0 } else { 2.0 }, 2.0, 16.0, 16.0));
+            // The knob travels and the track tints on the same short curve, so
+            // the switch reads as one movement rather than two events.
+            animated(compact_core::theme::duration::TOGGLE, || {
+                set_fill(track, if on { accent::PRIMARY } else { fill::TRACK_OFF });
+                set_frame(knob, rect(if on { 18.0 } else { 2.0 }, 2.0, 16.0, 16.0));
+            });
         }
 
         set_frame(&self.version_label, rect(pad, h - 34.0, 140.0, 13.0));

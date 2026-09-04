@@ -6,12 +6,13 @@ use objc2::rc::Retained;
 use objc2::runtime::AnyObject;
 use objc2::{msg_send, MainThreadMarker, MainThreadOnly};
 use objc2_core_graphics::CGColor;
+use objc2_quartz_core::CAMediaTimingFunction;
 use objc2_app_kit::{
-    NSColor, NSFont, NSTextField, NSView, NSVisualEffectBlendingMode, NSVisualEffectMaterial,
+    NSAnimationContext, NSColor, NSFont, NSTextField, NSView, NSVisualEffectBlendingMode, NSVisualEffectMaterial,
     NSVisualEffectState, NSVisualEffectView,
 };
 use objc2_core_foundation::{CGPoint, CGRect, CGSize};
-use objc2_foundation::NSString;
+use objc2_foundation::{NSNumber, NSString};
 
 use compact_core::theme::Rgba;
 
@@ -180,15 +181,94 @@ pub fn without_animation<R>(f: impl FnOnce() -> R) -> R {
     }
 }
 
-/// Run `f` inside an explicit CATransaction with a duration and easing.
+/// The canvas's easing curve as a `CAMediaTimingFunction`.
+pub fn ease() -> Retained<CAMediaTimingFunction> {
+    let [a, b, c, d] = compact_core::theme::EASE_OUT_EXPO;
+    CAMediaTimingFunction::functionWithControlPoints(a, b, c, d)
+}
+
+/// Animate AppKit view properties over `duration` with the design's easing.
+///
+/// Inside `f`, set properties on `view.animator()` rather than the view. This
+/// is the supported path for `NSView` geometry and alpha — `NSVisualEffectView`
+/// in particular manages its own backing layer, so driving its layer directly
+/// fights AppKit's layout instead of animating it.
+pub fn animate<R>(duration: f64, f: impl FnOnce() -> R) -> R {
+    NSAnimationContext::beginGrouping();
+    let ctx = NSAnimationContext::currentContext();
+    ctx.setDuration(duration);
+    ctx.setTimingFunction(Some(&ease()));
+    let r = f();
+    NSAnimationContext::endGrouping();
+    r
+}
+
+/// Run `f` inside an explicit CATransaction with a duration and the design's
+/// easing. For raw `CALayer` properties, which `NSAnimationContext` does not
+/// cover.
 pub fn animated<R>(duration: f64, f: impl FnOnce() -> R) -> R {
     unsafe {
         let cls = objc2::runtime::AnyClass::get(c"CATransaction").expect("CATransaction");
         let _: () = msg_send![cls, begin];
         let _: () = msg_send![cls, setAnimationDuration: duration];
+        let _: () = msg_send![cls, setAnimationTimingFunction: &*ease()];
         let r = f();
         let _: () = msg_send![cls, commit];
         r
+    }
+}
+
+/// Attach an infinitely repeating, auto-reversing opacity animation.
+///
+/// The canvas's `cpBreathe` keyframes on the onboarding hint.
+pub fn breathe(l: &Layer, from: f64, to: f64, period: f64) {
+    unsafe {
+        let cls = objc2::runtime::AnyClass::get(c"CABasicAnimation").expect("CABasicAnimation");
+        let key = NSString::from_str("opacity");
+        let anim: *mut AnyObject = msg_send![cls, animationWithKeyPath: &*key];
+        let _: () = msg_send![anim, setFromValue: &*NSNumber::new_f64(from)];
+        let _: () = msg_send![anim, setToValue: &*NSNumber::new_f64(to)];
+        // Half a period each way; auto-reverse supplies the return trip.
+        let _: () = msg_send![anim, setDuration: period / 2.0];
+        let _: () = msg_send![anim, setAutoreverses: true];
+        let _: () = msg_send![anim, setRepeatCount: f32::INFINITY];
+        let _: () = msg_send![anim, setTimingFunction: &*CAMediaTimingFunction::functionWithControlPoints(0.42, 0.0, 0.58, 1.0)];
+        let _: () = msg_send![&**l, addAnimation: anim, forKey: &*NSString::from_str("breathe")];
+    }
+}
+
+/// Horizontally offset a view's backing layer, in points.
+///
+/// Translation only. Rotation and scale would need the layer's `anchorPoint` at
+/// its centre, and AppKit owns that on a layer-backed `NSView` — fighting it is
+/// how you get a page that pivots about its corner.
+pub fn set_translate_x(host: *mut AnyObject, tx: f64) {
+    unsafe {
+        let t = [1.0f64, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, tx, 0.0, 0.0, 1.0];
+        let cls = objc2::runtime::AnyClass::get(c"NSValue").expect("NSValue");
+        let v: *mut AnyObject = msg_send![cls,
+            valueWithBytes: &t as *const _ as *const c_void,
+            objCType: c"{CATransform3D=dddddddddddddddd}".as_ptr()];
+        let _: () = msg_send![host, setValue: v, forKeyPath: &*NSString::from_str("transform")];
+    }
+}
+
+/// Set a view backing layer's opacity.
+pub fn set_host_opacity(host: *mut AnyObject, v: f64) {
+    unsafe {
+        let _: () = msg_send![host, setOpacity: v as f32];
+    }
+}
+
+/// Set a layer's vertical scale about its centre, for the address bar's squash.
+pub fn set_scale_y(l: &Layer, sy: f64) {
+    unsafe {
+        let t = [1.0f64, 0.0, 0.0, 0.0, 0.0, sy, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0];
+        let cls = objc2::runtime::AnyClass::get(c"NSValue").expect("NSValue");
+        let v: *mut AnyObject = msg_send![cls,
+            valueWithBytes: &t as *const _ as *const c_void,
+            objCType: c"{CATransform3D=dddddddddddddddd}".as_ptr()];
+        let _: () = msg_send![&**l, setValue: v, forKeyPath: &*NSString::from_str("transform")];
     }
 }
 

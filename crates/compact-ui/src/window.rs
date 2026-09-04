@@ -23,6 +23,7 @@ use objc2_foundation::{NSString, NSTimer};
 
 use compact_core::command::{resolve, Action, Mods};
 use compact_core::policy::LiveBudget;
+use compact_core::tab::TabId;
 use compact_core::theme::{bg, radius};
 use compact_core::{App, Effect, Overlay};
 use compact_engine::{TabEngine, WebKitEngine};
@@ -30,7 +31,7 @@ use compact_mem::{Guard, PressureMonitor};
 
 use crate::chrome::{Chrome, Hit};
 use crate::overlays::{Overlays, SettingsHit};
-use crate::widgets::rect;
+use crate::widgets::{animated, rect, without_animation};
 
 struct Inner {
     app: App,
@@ -44,6 +45,9 @@ struct Inner {
     /// WebKit helpers that existed before we started, so the footprint we
     /// report is ours and not some other browser's.
     census: compact_mem::WebKitCensus,
+    /// Weak self-handle, so deferred work can reach back without keeping the
+    /// shell alive past the window.
+    self_ref: std::rc::Weak<RefCell<Inner>>,
 }
 
 impl Inner {
@@ -59,6 +63,7 @@ impl Inner {
 
     /// Carry out the engine work the core asked for.
     fn perform(&mut self, effects: Vec<Effect>) {
+        let mut slide: Option<i8> = None;
         for e in effects {
             match e {
                 Effect::Load(id, url) => {
@@ -85,16 +90,78 @@ impl Inner {
                     f.setStringValue(&NSString::from_str(""));
                     self.window.makeFirstResponder(Some(&f));
                 }
-                Effect::SlideWorkspace(_) => {
-                    // The page swap is instant; the canvas's slide is a
-                    // transition on content we do not own, and faking it by
-                    // animating the web view would show a blank frame.
-                }
+                Effect::SlideWorkspace(dir) => slide = Some(dir),
             }
         }
         // Whatever just happened, the visible tab may have changed.
         let active = self.app.workspaces.current().active;
-        self.engine.show(active);
+        match slide {
+            Some(dir) if self.app.chrome.smooth_motion => self.slide_workspace(active, dir),
+            _ => self.engine.show(active),
+        }
+    }
+
+    /// The workspace transition: the outgoing page leaves in the direction of
+    /// travel and the incoming one arrives from the opposite side.
+    ///
+    /// Both pages are real, mounted web views — no snapshot is taken. Snapshots
+    /// would only help the incoming side, and the incoming side is exactly where
+    /// they are unavailable: a hibernated tab has nothing rendered to capture,
+    /// and keeping one per tab would mean caching a full-window image per tab,
+    /// which costs orders of magnitude more than the 687 B session it is
+    /// supposed to be accompanying.
+    fn slide_workspace(&mut self, active: TabId, dir: i8) {
+        use compact_core::theme::duration as dur;
+        let outgoing = self.engine.visible();
+        if outgoing == Some(active) || outgoing.is_none() {
+            self.engine.show(active);
+            return;
+        }
+        let (w, _) = self.size();
+        let travel = w * 0.15;
+        let d = dir as f64;
+
+        // Mount the incoming page beside the outgoing one, pre-offset to the
+        // side it should arrive from.
+        self.engine.mount_alongside(active);
+        let Some(incoming) = self.engine.view(active).map(host_layer_of) else {
+            self.engine.show(active);
+            return;
+        };
+        without_animation(|| {
+            crate::widgets::set_translate_x(incoming, d * travel);
+            crate::widgets::set_host_opacity(incoming, 0.0);
+        });
+
+        // Push the outgoing page out under it.
+        if let Some(prev) = outgoing.and_then(|id| self.engine.view(id)).map(host_layer_of) {
+            animated(dur::SLIDE_OUT, || {
+                crate::widgets::set_translate_x(prev, -d * travel);
+                crate::widgets::set_host_opacity(prev, 0.0);
+            });
+        }
+        animated(dur::SLIDE_IN, || {
+            crate::widgets::set_translate_x(incoming, 0.0);
+            crate::widgets::set_host_opacity(incoming, 1.0);
+        });
+
+        // Detach the outgoing page once it is off screen, and reset the
+        // transform so it is centred again the next time it is shown.
+        if let Some(prev) = outgoing {
+            let me = self.self_ref.clone();
+            queue_after(dur::SLIDE_IN, move || {
+                if let Some(inner) = me.upgrade() {
+                    let i = inner.borrow_mut();
+                    if let Some(l) = i.engine.view(prev).map(host_layer_of) {
+                        without_animation(|| {
+                            crate::widgets::set_translate_x(l, 0.0);
+                            crate::widgets::set_host_opacity(l, 1.0);
+                        });
+                    }
+                    i.engine.unmount(prev);
+                }
+            });
+        }
     }
 
     /// Push state into the layer tree.
@@ -202,7 +269,9 @@ impl Shell {
             // Snapshot before the first web view exists — helpers are launchd
             // XPC services with ppid 1 and cannot be attributed by parentage.
             census: compact_mem::WebKitCensus::baseline(),
+            self_ref: std::rc::Weak::new(),
         }));
+        inner.borrow_mut().self_ref = Rc::downgrade(&inner);
 
         // Memory pressure: shed live tabs when the system asks.
         if let Some((monitor, cell)) = PressureMonitor::start(None) {
@@ -340,7 +409,12 @@ fn install_monitors(inner: &Rc<RefCell<Inner>>) {
         let mut i = moves.borrow_mut();
         let (x, y) = point_of(&i, event);
         let size = i.size();
-        if i.app.on_cursor(Some((x, y)), size) {
+        let revealed = i.app.on_cursor(Some((x, y)), size);
+        // Hover is only meaningful over visible chrome; hit-testing hidden
+        // chrome would tint rows nobody can see.
+        let hit = i.chrome.hit(&i.app, x, y);
+        let hovered = i.chrome.set_hover(hit);
+        if revealed || hovered {
             i.render();
         }
         event as *const NSEvent as *mut NSEvent
@@ -572,4 +646,9 @@ fn install_menu(mtm: MainThreadMarker, app: &NSApplication) {
     app_item.setSubmenu(Some(&app_menu));
 
     app.setMainMenu(Some(&menubar));
+}
+
+/// A view's backing layer as the untyped pointer AppKit hands back.
+pub fn host_layer_of<T: objc2::Message>(view: &T) -> *mut objc2::runtime::AnyObject {
+    unsafe { objc2::msg_send![view, layer] }
 }

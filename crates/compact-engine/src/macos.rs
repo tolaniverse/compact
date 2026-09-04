@@ -151,6 +151,30 @@ impl WebKitEngine {
         }
     }
 
+    /// Which tab is currently mounted, if any.
+    pub fn visible(&self) -> Option<TabId> {
+        self.visible
+    }
+
+    /// Mount `id` alongside whatever is already showing, without unmounting it.
+    ///
+    /// Used for the workspace transition, which needs both pages on screen at
+    /// once. `unmount` ends it.
+    pub fn mount_alongside(&mut self, id: TabId) {
+        if let Some(v) = self.views.get(&id) {
+            v.setFrame(self.container.bounds());
+            self.container.addSubview(v);
+            self.visible = Some(id);
+        }
+    }
+
+    /// Detach a tab's view from the hierarchy without destroying it.
+    pub fn unmount(&self, id: TabId) {
+        if let Some(v) = self.views.get(&id) {
+            v.removeFromSuperview();
+        }
+    }
+
     /// The live view for a tab, for the UI layer to size or focus.
     pub fn view(&self, id: TabId) -> Option<&WKWebView> {
         self.views.get(&id).map(|v| &**v)
