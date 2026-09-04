@@ -638,7 +638,7 @@ impl Chrome {
                     set_frame(&toast.source, rect(13.0, 58.0, tw - 110.0, 15.0));
                     set_text(&toast.source, &n.source);
                     set_frame(&toast.action, rect(tw - 100.0, 58.0, 87.0, 15.0));
-                    set_text(&toast.action, n.action_label(app.workspaces.current));
+                    set_text(&toast.action, &n.action_label(app.workspaces.current));
                 }
             }
         }

@@ -572,6 +572,8 @@ fn install_ticker(inner: &Rc<RefCell<Inner>>) {
     let block = RcBlock::new(move |_t: NonNull<NSTimer>| {
         let mut i = tick.borrow_mut();
         let now = i.now_ms();
+        // Keep the core's clock current so toasts age and expire correctly.
+        i.app.clock = now;
         let mut dirty = i.app.notifications.expire(now);
 
         // Adopt real page titles as navigations settle — across every

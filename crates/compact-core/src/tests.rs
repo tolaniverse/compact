@@ -2,7 +2,18 @@ use crate::chrome::{ChromeConfig, ChromeVisibility, Reveal, TabLayout};
 use crate::command::{resolve, Action, Mods};
 use crate::policy::{plan_eviction, prewarm_candidates, LiveBudget, Pressure};
 use crate::tab::{TabId, TabMeta, TabState, ESTIMATED_LIVE_BYTES};
+use crate::notify::Kind;
 use crate::{App, Effect, Overlay};
+
+/// Activity toasts only — a workspace switch always leaves a status
+/// confirmation behind, which is not what these assertions are about.
+fn activity(app: &App) -> Vec<&crate::notify::Notification> {
+    app.notifications
+        .items()
+        .iter()
+        .filter(|n| n.kind == Kind::Activity)
+        .collect()
+}
 
 const MB: u64 = 1024 * 1024;
 
@@ -460,7 +471,7 @@ fn jumping_to_a_notification_crosses_workspaces_and_focuses_the_tab() {
     app.apply(Action::JumpLatestNotification);
     assert_eq!(app.workspaces.current, 1);
     assert_eq!(app.workspaces.current().active, target);
-    assert!(app.notifications.is_empty(), "acting on a toast consumes it");
+    assert!(activity(&app).is_empty(), "acting on a toast consumes it");
 }
 
 #[test]
@@ -514,7 +525,7 @@ fn opening_a_toast_from_another_workspace_travels_to_it() {
     assert_eq!(app.workspaces.current, 2);
     assert_eq!(app.workspaces.current().active, target);
     assert!(fx.contains(&Effect::SlideWorkspace(1)), "a cross-workspace open slides");
-    assert!(app.notifications.is_empty());
+    assert!(activity(&app).is_empty());
 }
 
 #[test]
@@ -572,6 +583,54 @@ fn arriving_in_a_workspace_clears_its_toasts() {
     let tab = app.workspaces.spaces[1].tabs[0].id;
     app.notifications.push(1, "x", "board.internal", tab, 0);
     app.apply(Action::SwitchWorkspace(1));
+    assert!(activity(&app).is_empty());
+}
+
+#[test]
+fn arriving_in_a_workspace_confirms_where_you_are() {
+    // After ⌘2 the workspace name may be nowhere on screen — the chrome that
+    // carries it is hidden by default.
+    let mut app = App::new();
+    app.apply(Action::SwitchWorkspace(1));
+    let items = app.notifications.items();
+    assert_eq!(items.len(), 1);
+    let n = &items[0];
+    assert_eq!(n.kind, Kind::Status);
+    assert_eq!(n.workspace, 1);
+    assert_eq!(n.text, "Sprint board", "names the tab you landed on");
+    assert_eq!(n.source, "4 tabs");
+    assert_eq!(n.action_label(1), "⌘2", "advertises the binding");
+}
+
+#[test]
+fn only_one_arrival_toast_survives_rapid_switching() {
+    // Holding ⌘1/⌘2/⌘3 would otherwise leave three confirmations up, two of
+    // which are already wrong.
+    let mut app = App::new();
+    app.apply(Action::SwitchWorkspace(1));
+    app.apply(Action::SwitchWorkspace(2));
+    app.apply(Action::SwitchWorkspace(0));
+    let items = app.notifications.items();
+    assert_eq!(items.len(), 1);
+    assert_eq!(items[0].workspace, 0);
+}
+
+#[test]
+fn an_arrival_toast_expires_sooner_than_activity() {
+    let mut app = App::new();
+    app.apply(Action::SwitchWorkspace(1));
+    assert!(!app.notifications.expire(2_000), "still up at 2s");
+    assert!(app.notifications.expire(3_000), "gone by 3s");
+}
+
+#[test]
+fn an_arrival_toast_is_not_a_travel_target() {
+    // The user is already there; ⌘⇧J must not treat it as somewhere to go.
+    let mut app = App::new();
+    app.apply(Action::SwitchWorkspace(1));
+    let id = app.notifications.items()[0].id;
+    assert!(app.notifications.latest_elsewhere(1).is_none());
+    assert!(app.open_notification(id).is_empty(), "clicking it only dismisses");
     assert!(app.notifications.is_empty());
 }
 

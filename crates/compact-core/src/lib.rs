@@ -89,6 +89,12 @@ pub struct App {
     /// The onboarding hint, dismissed permanently on first real interaction.
     pub hint_visible: bool,
 
+    /// Monotonic milliseconds, supplied by the shell.
+    ///
+    /// The core never reads a clock itself, so toast ages and expiry stay
+    /// exactly testable.
+    pub clock: u64,
+
     /// Real footprint of the browser and its web content processes, in bytes,
     /// when the platform has measured one. Preferred over the per-tab estimate
     /// for anything shown to the user.
@@ -115,6 +121,7 @@ impl App {
             selection: 0,
             address_draft: None,
             hint_visible: true,
+            clock: 0,
             measured_footprint: None,
         }
     }
@@ -271,7 +278,25 @@ impl App {
         fx.push(Effect::SlideWorkspace(dir));
         let active = self.workspaces.current().active;
         fx.extend(self.select_tab(active));
+        self.post_arrival(to);
         fx
+    }
+
+    /// Confirm which workspace the user just landed in.
+    ///
+    /// Workspaces are otherwise identified only by an accent colour and a name
+    /// in chrome that is hidden by default, so after a ⌘2 the answer to "where
+    /// am I" can be nowhere on screen. The toast carries the workspace's own
+    /// colour and name, plus what is actually in front of you.
+    ///
+    /// Posted after `select_tab`, so it names the tab the switch settled on
+    /// rather than the one that was active before it.
+    fn post_arrival(&mut self, to: usize) {
+        let Some(ws) = self.workspaces.spaces.get(to) else { return };
+        let active = ws.active_tab();
+        let (text, source, tab) = (active.title.clone(), ws.count_label(), active.id);
+        self.notifications
+            .push_status(to, text, source, tab, self.clock);
     }
 
     fn jump_latest(&mut self) -> Vec<Effect> {
@@ -304,6 +329,12 @@ impl App {
         let Some(n) = self.notifications.items().iter().find(|n| n.id == id) else {
             return Vec::new();
         };
+        // A status toast is a confirmation, not a destination — the user is
+        // already where it points. Clicking it just gets it out of the way.
+        if n.kind == notify::Kind::Status {
+            self.notifications.dismiss(id);
+            return Vec::new();
+        }
         let (ws, tab) = (n.workspace, n.tab);
         self.notifications.dismiss(id);
         if ws == self.workspaces.current {
