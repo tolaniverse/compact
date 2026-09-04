@@ -317,6 +317,97 @@ pub fn breathe(l: &Layer, from: f64, to: f64, period: f64) {
 ///
 /// Translation only. Rotation and scale would need the layer's `anchorPoint` at
 
+/// A view's backing layer, as the untyped pointer AppKit hands back.
+pub fn host_layer<T: objc2::Message>(view: &T) -> *mut AnyObject {
+    unsafe { msg_send![view, layer] }
+}
+
+/// A 2D rotate + scale + translate about a layer's **centre**, expressed with
+/// the anchor left at the origin.
+///
+/// AppKit owns `anchorPoint` on a layer-backed `NSView` and resets it during
+/// layout, so moving the anchor to the middle and back is a fight. Composing
+/// `translate(c) · rotate · scale · translate(-c)` gets the same pivot with the
+/// anchor untouched.
+pub fn card_transform(size: (f64, f64), dx: f64, degrees: f64, scale: f64) -> [f64; 16] {
+    let (cx, cy) = (size.0 / 2.0, size.1 / 2.0);
+    let (s, c) = degrees.to_radians().sin_cos();
+    let (a, b) = (scale * c, scale * s);
+    let (cc, d) = (-scale * s, scale * c);
+    let tx = cx - a * cx - cc * cy + dx;
+    let ty = cy - b * cx - d * cy;
+    // Column-major, as CATransform3D is laid out in memory.
+    [a, b, 0.0, 0.0, cc, d, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, tx, ty, 0.0, 1.0]
+}
+
+/// The identity transform.
+pub fn identity_transform() -> [f64; 16] {
+    card_transform((0.0, 0.0), 0.0, 0.0, 1.0)
+}
+
+/// Wrap a 4x4 matrix in the `NSValue` a layer's `transform` expects.
+fn transform_value(t: &[f64; 16]) -> *mut AnyObject {
+    unsafe {
+        let cls = objc2::runtime::AnyClass::get(c"NSValue").expect("NSValue");
+        msg_send![cls,
+            valueWithBytes: t as *const _ as *const c_void,
+            objCType: c"{CATransform3D=dddddddddddddddd}".as_ptr()]
+    }
+}
+
+/// Animate a layer's transform and opacity together, explicitly.
+///
+/// Explicit `CABasicAnimation` rather than an implicit one: a layer-backed
+/// `NSView` answers `actionForKey:` with `NSNull`, so implicit animations on its
+/// backing layer are suppressed and every value simply jumps. `NSAnimationContext`
+/// is no help either — it proxies view properties, and `transform` is not one.
+pub fn animate_card(
+    host: *mut AnyObject,
+    from: [f64; 16],
+    to: [f64; 16],
+    from_opacity: f64,
+    to_opacity: f64,
+    duration: f64,
+    curve: [f32; 4],
+) {
+    unsafe {
+        let basic = objc2::runtime::AnyClass::get(c"CABasicAnimation").expect("CABasicAnimation");
+        let timing = timing(curve);
+
+        // Set the model values first so the layer settles where we want it, and
+        // animate from the old ones on top.
+        let _: () = msg_send![host, setValue: transform_value(&to),
+                                    forKeyPath: &*NSString::from_str("transform")];
+        let _: () = msg_send![host, setOpacity: to_opacity as f32];
+
+        let key = NSString::from_str("transform");
+        let anim: *mut AnyObject = msg_send![basic, animationWithKeyPath: &*key];
+        let _: () = msg_send![anim, setFromValue: transform_value(&from)];
+        let _: () = msg_send![anim, setToValue: transform_value(&to)];
+        let _: () = msg_send![anim, setDuration: duration];
+        let _: () = msg_send![anim, setTimingFunction: &*timing];
+        let _: () = msg_send![host, addAnimation: anim, forKey: &*key];
+
+        let okey = NSString::from_str("opacity");
+        let oanim: *mut AnyObject = msg_send![basic, animationWithKeyPath: &*okey];
+        let _: () = msg_send![oanim, setFromValue: &*NSNumber::new_f64(from_opacity)];
+        let _: () = msg_send![oanim, setToValue: &*NSNumber::new_f64(to_opacity)];
+        let _: () = msg_send![oanim, setDuration: duration];
+        let _: () = msg_send![oanim, setTimingFunction: &*timing];
+        let _: () = msg_send![host, addAnimation: oanim, forKey: &*okey];
+    }
+}
+
+/// Put a layer back to flat and opaque with no animation.
+pub fn reset_card(host: *mut AnyObject) {
+    unsafe {
+        let _: () = msg_send![host, removeAllAnimations];
+        let _: () = msg_send![host, setValue: transform_value(&identity_transform()),
+                                    forKeyPath: &*NSString::from_str("transform")];
+        let _: () = msg_send![host, setOpacity: 1.0f32];
+    }
+}
+
 /// Set a layer's vertical scale about its centre, for the address bar's squash.
 pub fn set_scale_y(l: &Layer, sy: f64) {
     unsafe {

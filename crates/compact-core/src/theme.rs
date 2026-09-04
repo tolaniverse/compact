@@ -168,6 +168,13 @@ pub const EASE_OUT_EXPO: [f32; 4] = [0.16, 1.0, 0.3, 1.0];
 /// page should be seen travelling.
 pub const EASE_SLIDE: [f32; 4] = [0.2, 0.9, 0.25, 1.0];
 
+/// How far a workspace card travels sideways, as a fraction of window width.
+pub const CARD_TRAVEL: f64 = 0.07;
+/// How far a card tilts as it leaves or arrives, in degrees.
+pub const CARD_TILT: f64 = 4.0;
+/// How far a card shrinks as it drops to the back of the deck.
+pub const CARD_SCALE: f64 = 0.92;
+
 /// Animation durations, in seconds, matching the canvas transitions.
 pub mod duration {
     /// Sidebar / strip tear-in.
@@ -176,9 +183,11 @@ pub mod duration {
     pub const ADDRESS: f64 = 0.52;
     /// Settings drawer.
     pub const SETTINGS: f64 = 0.46;
-    /// Workspace slide-out and slide-in halves.
-    pub const SLIDE_OUT: f64 = 0.24;
-    pub const SLIDE_IN: f64 = 0.50;
+    /// Workspace card riffle. Both halves run together rather than in
+    /// sequence, and short: switching workspaces is a keystroke you make
+    /// constantly, so the motion has to read as instant, not as a scene change.
+    pub const SLIDE_OUT: f64 = 0.26;
+    pub const SLIDE_IN: f64 = 0.32;
     /// Hover tint.
     pub const HOVER: f64 = 0.16;
     /// Chrome opacity fade — shorter than the slide, so chrome is fully opaque

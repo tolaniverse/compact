@@ -12,11 +12,11 @@ use std::time::Instant;
 
 use block2::RcBlock;
 use objc2::rc::Retained;
-use objc2::{msg_send, MainThreadMarker, MainThreadOnly, Message};
+use objc2::{msg_send, MainThreadMarker, MainThreadOnly};
 use objc2_app_kit::{
-    NSAnimatablePropertyContainer,
     NSApplication, NSApplicationActivationPolicy, NSBackingStoreType, NSColor, NSEvent,
-    NSEventMask, NSEventModifierFlags, NSEventType, NSView, NSWindow, NSWindowStyleMask,
+    NSEventMask, NSEventModifierFlags, NSEventType, NSView, NSWindow, NSWindowButton,
+    NSWindowStyleMask,
     NSWindowTitleVisibility,
 };
 use objc2_core_foundation::CGRect;
@@ -32,7 +32,9 @@ use compact_mem::{Guard, PressureMonitor};
 
 use crate::chrome::{Chrome, Hit};
 use crate::overlays::{Overlays, SettingsHit};
-use crate::widgets::{animate_with, queue_after, rect, without_animation};
+use crate::widgets::{
+    animate_card, card_transform, host_layer, identity_transform, queue_after, reset_card, rect,
+};
 
 struct Inner {
     app: App,
@@ -119,71 +121,75 @@ impl Inner {
         }
     }
 
-    /// The workspace transition: the outgoing page leaves in the direction of
-    /// travel and the incoming one arrives from the opposite side.
+    /// The workspace transition: a card riffle.
     ///
-    /// Animates view `frame` and `alphaValue` through `NSAnimationContext`,
-    /// not layer `transform`. A layer-backed `NSView` answers `actionForKey:`
-    /// with `NSNull`, so implicit `CALayer` animations on its backing layer are
-    /// suppressed and every value simply jumps — which is what an earlier
-    /// version of this did.
+    /// The outgoing workspace tilts, shrinks and drops back like a card being
+    /// pushed under the deck, while the incoming one rises from the opposite
+    /// tilt to sit flat. Both run at once and both are short — switching
+    /// workspaces is a constant keystroke, so it has to read as instant.
+    ///
+    /// Driven by explicit `CABasicAnimation` on each web view's backing layer.
+    /// `NSAnimationContext` cannot help here: it proxies view properties, and
+    /// `transform` is a layer property.
     ///
     /// Both pages are real, mounted web views; no snapshot is taken. Snapshots
     /// would only help the incoming side, and that is exactly where they are
-    /// unavailable: a hibernated tab has nothing rendered to capture, and
+    /// unavailable — a hibernated tab has nothing rendered to capture, and
     /// keeping one per tab would mean a full-window image against a 687 B
     /// session.
     fn slide_workspace(&mut self, active: TabId, dir: i8) {
-        use compact_core::theme::duration as dur;
+        use compact_core::theme::{duration as dur, CARD_SCALE, CARD_TILT, CARD_TRAVEL, EASE_SLIDE};
         let outgoing = self.engine.visible();
         if outgoing == Some(active) || outgoing.is_none() {
             self.engine.show(active);
             return;
         }
-        let (w, h) = self.size();
-        let travel = w * 0.15;
+        let size = self.size();
+        let travel = size.0 * CARD_TRAVEL;
         let d = dir as f64;
-        let full = rect(0.0, 0.0, w, h);
+        let flat = identity_transform();
 
-        // Mount the incoming page beside the outgoing one, parked on the side
-        // it should arrive from.
+        // Mount the incoming page beside the outgoing one, already tilted to
+        // the side it arrives from.
         self.engine.mount_alongside(active);
-        let Some(incoming) = self.engine.view(active).map(|v| v.retain()) else {
+        let Some(incoming) = self.engine.view(active).map(|v| host_layer(v)) else {
             self.engine.show(active);
             return;
         };
-        without_animation(|| {
-            incoming.setFrame(rect(d * travel, 0.0, w, h));
-            incoming.setAlphaValue(0.0);
-        });
-
-        // Hold off `render`'s frame reset until the travel is over, or it will
-        // snap the incoming page to centre on the very next tick.
         self.sliding = true;
 
-        if let Some(prev) = outgoing.and_then(|id| self.engine.view(id)).map(|v| v.retain()) {
-            animate_with(compact_core::theme::EASE_SLIDE, dur::SLIDE_OUT, || {
-                prev.animator().setFrame(rect(-d * travel, 0.0, w, h));
-                prev.animator().setAlphaValue(0.0);
-            });
+        // The outgoing card slides under: away from the direction of travel,
+        // tilted and shrunk so it reads as going behind rather than merely off.
+        if let Some(prev) = outgoing.and_then(|id| self.engine.view(id)).map(host_layer) {
+            animate_card(
+                prev,
+                flat,
+                card_transform(size, -d * travel, -d * CARD_TILT, CARD_SCALE),
+                1.0,
+                0.0,
+                dur::SLIDE_OUT,
+                EASE_SLIDE,
+            );
         }
-        animate_with(compact_core::theme::EASE_SLIDE, dur::SLIDE_IN, || {
-            incoming.animator().setFrame(full);
-            incoming.animator().setAlphaValue(1.0);
-        });
+        animate_card(
+            incoming,
+            card_transform(size, d * travel, d * CARD_TILT, CARD_SCALE),
+            flat,
+            0.0,
+            1.0,
+            dur::SLIDE_IN,
+            EASE_SLIDE,
+        );
 
-        // Detach the outgoing page once it is off screen and restore its
-        // geometry, so it is centred and opaque the next time it is shown.
+        // Detach the outgoing page once it is out of sight, and flatten it so
+        // it is square and opaque the next time it is shown.
         let me = self.self_ref.clone();
         queue_after(dur::SLIDE_IN, move || {
             let Some(inner) = me.upgrade() else { return };
             let mut i = inner.borrow_mut();
             if let Some(prev) = outgoing {
-                if let Some(v) = i.engine.view(prev).map(|v| v.retain()) {
-                    without_animation(|| {
-                        v.setFrame(full);
-                        v.setAlphaValue(1.0);
-                    });
+                if let Some(l) = i.engine.view(prev).map(host_layer) {
+                    reset_card(l);
                 }
                 i.engine.unmount(prev);
             }
@@ -278,6 +284,14 @@ impl Shell {
         )));
         window.setAcceptsMouseMovedEvents(true);
         window.center();
+        // No close or minimise. Compact is keyboard-first and its chrome is
+        // hidden by default; two permanently-visible buttons sitting over the
+        // page undercut that. ⌘W closes a tab, ⌘Q quits, ⌘H hides.
+        for b in [NSWindowButton::CloseButton, NSWindowButton::MiniaturizeButton] {
+            if let Some(button) = window.standardWindowButton(b) {
+                button.setHidden(true);
+            }
+        }
 
         let content = window.contentView().ok_or("window has no content view")?;
         content.setWantsLayer(true);
