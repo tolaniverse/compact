@@ -1,0 +1,28 @@
+[package]
+name = "compact-ui"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+compact-core = { workspace = true }
+compact-engine = { workspace = true }
+compact-mem = { workspace = true }
+
+[target.'cfg(target_os = "macos")'.dependencies]
+objc2 = { workspace = true }
+objc2-core-foundation = { workspace = true }
+objc2-core-graphics = { workspace = true, features = ["CGColor"] }
+block2 = { workspace = true }
+objc2-foundation = { workspace = true, features = [
+  "NSString", "NSGeometry", "NSValue", "NSDictionary", "NSArray",
+  "NSObjCRuntime", "NSNotification", "NSRunLoop", "NSDate", "NSThread", "NSTimer", "block2",
+] }
+objc2-app-kit = { workspace = true, features = [
+  "block2", "objc2-core-graphics", "NSApplication", "NSWindow", "NSView", "NSResponder", "NSColor",
+  "NSVisualEffectView", "NSGraphics", "NSEvent", "NSTextField", "NSControl",
+  "NSText", "NSScreen", "NSButton", "NSFont", "NSAnimationContext",
+  "NSTrackingArea", "NSCursor", "NSSecureTextField", "NSTextFieldCell",
+  "NSCell", "NSActionCell", "NSAttributedString", "NSStringDrawing",
+  "NSParagraphStyle", "NSLayoutConstraint", "NSAppearance", "NSImage",
+  "NSMenu", "NSMenuItem", "NSPasteboard", "NSSlider",
+] }

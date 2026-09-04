@@ -1,0 +1,14 @@
+[package]
+name = "memspike"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+compact-core = { workspace = true }
+
+[target.'cfg(target_os = "macos")'.dependencies]
+compact-engine = { workspace = true }
+compact-mem = { workspace = true }
+objc2 = { workspace = true }
+objc2-foundation = { workspace = true, features = ["NSRunLoop", "NSDate", "NSString"] }
+objc2-app-kit = { workspace = true, features = ["NSApplication", "NSResponder", "NSWindow", "NSView", "NSGraphics"] }

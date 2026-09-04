@@ -1,0 +1,37 @@
+[workspace]
+resolver = "2"
+members = [
+  "crates/compact-core",
+  "crates/compact-engine",
+  "crates/compact-mem",
+  "crates/compact-ui",
+  "crates/compact",
+  "crates/memspike",
+  "xtask",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.82"
+
+[workspace.dependencies]
+compact-core   = { path = "crates/compact-core" }
+compact-engine = { path = "crates/compact-engine" }
+compact-mem    = { path = "crates/compact-mem" }
+compact-ui     = { path = "crates/compact-ui" }
+
+objc2            = "0.6"
+objc2-foundation = "0.3"
+objc2-app-kit    = "0.3"
+objc2-web-kit    = "0.3"
+objc2-core-foundation = "0.3"
+objc2-core-graphics   = "0.3"
+block2           = "0.6"
+
+[profile.release]
+opt-level = 3
+lto = "thin"
+codegen-units = 1
+panic = "abort"
+strip = true

@@ -1,0 +1,7 @@
+[package]
+name = "compact-mem"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+compact-core = { workspace = true }

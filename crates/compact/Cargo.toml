@@ -1,0 +1,11 @@
+[package]
+name = "compact"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+compact-core = { workspace = true }
+
+[target.'cfg(target_os = "macos")'.dependencies]
+compact-ui = { workspace = true }
+objc2 = { workspace = true }

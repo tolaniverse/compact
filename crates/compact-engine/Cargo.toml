@@ -1,0 +1,20 @@
+[package]
+name = "compact-engine"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+compact-core = { workspace = true }
+
+[target.'cfg(target_os = "macos")'.dependencies]
+objc2 = { workspace = true }
+objc2-core-foundation = { workspace = true }
+objc2-foundation = { workspace = true, features = [
+  "NSString", "NSURL", "NSURLRequest", "NSData", "NSGeometry", "NSValue",
+  "NSDictionary", "NSError", "NSObjCRuntime", "NSKeyedArchiver", "NSCoder",
+] }
+objc2-app-kit = { workspace = true, features = ["NSView", "NSResponder", "NSGraphics"] }
+objc2-web-kit = { workspace = true, features = [
+  "WKWebView", "WKWebViewConfiguration", "WKNavigation", "WKProcessPool",
+  "WKPreferences", "WKWebsiteDataStore", "WKUserContentController", "WKBackForwardList",
+] }
