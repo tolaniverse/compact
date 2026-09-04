@@ -106,7 +106,12 @@ impl WebKitEngine {
             objc2_app_kit::NSAutoresizingMaskOptions::ViewWidthSizable
                 | objc2_app_kit::NSAutoresizingMaskOptions::ViewHeightSizable,
         );
-        self.container.addSubview(&view);
+        // Deliberately *not* mounted here. Only `show` puts a view in the
+        // hierarchy: a tab created in the background — a prewarm, or a restore
+        // the user has not switched to — would otherwise be added on top of the
+        // visible page and silently replace it. Keeping exactly one view
+        // mounted also avoids paying compositing resources for tabs nobody is
+        // looking at.
         self.views.insert(id, view.clone());
         view
     }
@@ -131,10 +136,10 @@ impl WebKitEngine {
     /// Detaching rather than merely hiding matters: an attached-but-hidden web
     /// view keeps compositing resources alive.
     pub fn show(&mut self, id: TabId) {
-        if self.visible == Some(id) {
-            return;
-        }
-        if let Some(prev) = self.visible.take() {
+        // No early return on `visible == id`: the view may have been rebuilt by
+        // a restore since it was last mounted, so re-mounting is the only way
+        // to be sure the hierarchy holds the current view for this tab.
+        if let Some(prev) = self.visible.take().filter(|p| *p != id) {
             if let Some(v) = self.views.get(&prev) {
                 v.removeFromSuperview();
             }

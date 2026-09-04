@@ -519,9 +519,18 @@ fn queue_after(delay: f64, f: impl FnOnce() + 'static) {
     std::mem::forget(block);
 }
 
-/// Preflight the machine before we start allocating web views.
-pub fn preflight() -> Result<(), String> {
-    Guard::default().check().map(|_| ()).map_err(|e| e.to_string())
+/// Report memory conditions at startup.
+///
+/// Deliberately advisory, not a gate. The spike harness refuses to run on a
+/// loaded machine because it allocates aggressively on purpose; a browser that
+/// refused to open because the machine was busy would just be broken. Compact
+/// adapts instead — [`LiveBudget::from_available`] sizes the live set to what
+/// is actually free, and memory pressure shrinks it further.
+pub fn preflight() -> Option<String> {
+    match Guard::default().check() {
+        Ok(_) => None,
+        Err(e) => Some(e.to_string()),
+    }
 }
 
 #[allow(dead_code)]

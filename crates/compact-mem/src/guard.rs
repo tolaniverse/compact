@@ -87,7 +87,7 @@ impl std::fmt::Display for GuardError {
             }
             GuardError::NotEnoughMemory { available, required } => write!(
                 f,
-                "only {} available, need {} — close something or lower --tabs",
+                "only {} available, need {}",
                 crate::human(*available),
                 crate::human(*required)
             ),

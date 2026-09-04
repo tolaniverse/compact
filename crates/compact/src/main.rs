@@ -10,12 +10,11 @@ fn main() {
 
     #[cfg(target_os = "macos")]
     {
-        // Refuse to start on a machine that is already out of memory. Compact
-        // spawns web content processes; starting into a thrashing system makes
-        // the whole machine worse, not just this app.
-        if let Err(e) = compact_ui::preflight() {
-            eprintln!("compact: {e}");
-            std::process::exit(1);
+        // Advisory only. Compact adapts to a loaded machine by sizing its live
+        // tab set to what is free, so a tight machine means fewer live tabs,
+        // not a refusal to open.
+        if let Some(warning) = compact_ui::preflight() {
+            eprintln!("compact: running with a reduced live-tab budget — {warning}");
         }
 
         let mtm = objc2::MainThreadMarker::new()

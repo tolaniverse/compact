@@ -136,6 +136,7 @@ fn main() {
         Ok(m) => m,
         Err(e) => {
             eprintln!("memspike: refusing to start — {e}");
+            eprintln!("  close something, lower --tabs/--live, or pass --min-available to override");
             std::process::exit(1);
         }
     };
