@@ -69,6 +69,98 @@ pub enum Effect {
     SlideWorkspace(i8),
 }
 
+/// Where an address-bar entry points.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Target {
+    /// Full URL to load.
+    pub url: String,
+    /// What the address bar shows — the URL without its scheme.
+    pub display: String,
+    /// Provisional title, replaced by the real one once the page loads.
+    pub title: String,
+}
+
+/// Search used when input is not an address.
+///
+/// DuckDuckGo rather than Google: it needs no cookies or account to work, which
+/// suits a browser whose whole premise is not accumulating state.
+const SEARCH_URL: &str = "https://duckduckgo.com/?q=";
+
+/// Decide whether `input` is an address or a search query.
+///
+/// The rule is deliberately conservative about calling something a URL. A user
+/// typing `rust ownership` means a search; a user typing `rust-lang.org` means a
+/// site. The discriminator is a dot in the first path segment with no spaces
+/// around it — plus an explicit scheme or `localhost`, which are unambiguous.
+pub fn parse_address(input: &str) -> Option<Target> {
+    let raw = input.trim();
+    if raw.is_empty() {
+        return None;
+    }
+
+    let has_scheme = raw.starts_with("http://") || raw.starts_with("https://");
+    let stripped = raw
+        .strip_prefix("https://")
+        .or_else(|| raw.strip_prefix("http://"))
+        .unwrap_or(raw);
+    let head = stripped.split('/').next().unwrap_or(stripped);
+    // Strip any port before judging whether the host looks like a domain.
+    let hostname = head.split(':').next().unwrap_or(head);
+
+    let looks_like_host = !raw.contains(char::is_whitespace)
+        && (hostname == "localhost"
+            || (hostname.contains('.')
+                && !hostname.starts_with('.')
+                && !hostname.ends_with('.')));
+
+    if has_scheme || looks_like_host {
+        let url = if has_scheme {
+            raw.to_string()
+        } else {
+            format!("https://{stripped}")
+        };
+        let title = hostname
+            .strip_prefix("www.")
+            .unwrap_or(hostname)
+            .split('.')
+            .next()
+            .filter(|s| !s.is_empty())
+            .map(capitalize)
+            .unwrap_or_else(|| hostname.to_string());
+        return Some(Target { url, display: stripped.to_string(), title });
+    }
+
+    let query = percent_encode(raw);
+    Some(Target {
+        url: format!("{SEARCH_URL}{query}"),
+        display: raw.to_string(),
+        title: raw.to_string(),
+    })
+}
+
+fn capitalize(s: &str) -> String {
+    let mut c = s.chars();
+    match c.next() {
+        Some(f) => f.to_uppercase().collect::<String>() + c.as_str(),
+        None => String::new(),
+    }
+}
+
+/// Percent-encode a query string. Hand-rolled to keep the core dependency-free.
+fn percent_encode(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for b in s.as_bytes() {
+        match b {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
+                out.push(*b as char)
+            }
+            b' ' => out.push('+'),
+            _ => out.push_str(&format!("%{b:02X}")),
+        }
+    }
+    out
+}
+
 /// The whole application state.
 pub struct App {
     pub workspaces: WorkspaceSet,
@@ -400,43 +492,27 @@ impl App {
         self.address_draft = Some(text.into());
     }
 
-    /// Commit the address field (Enter). Normalizes bare hosts to https and
-    /// derives a provisional title, which the real title replaces once the
-    /// navigation commits.
+    /// Commit the address field (Enter).
+    ///
+    /// Anything that is not plausibly an address is treated as a search, which
+    /// is what makes a single bar usable for both. See [`parse_address`].
     pub fn commit_address(&mut self) -> Vec<Effect> {
         let Some(raw) = self.address_draft.take() else {
             return Vec::new();
         };
-        let raw = raw.trim();
-        if raw.is_empty() {
-            return Vec::new();
-        }
-        let stripped = raw
-            .strip_prefix("https://")
-            .or_else(|| raw.strip_prefix("http://"))
-            .unwrap_or(raw);
-        let host = stripped.split('/').next().unwrap_or(stripped);
-        let title = host
-            .split('.')
-            .next()
-            .filter(|s| !s.is_empty())
-            .map(|s| {
-                let mut c = s.chars();
-                match c.next() {
-                    Some(f) => f.to_uppercase().collect::<String>() + c.as_str(),
-                    None => String::new(),
-                }
-            })
-            .unwrap_or_else(|| host.to_string());
+        self.navigate(&raw)
+    }
 
-        let url = if raw.starts_with("http") {
-            raw.to_string()
-        } else {
-            format!("https://{stripped}")
+    /// Navigate the active tab to whatever `input` denotes.
+    pub fn navigate(&mut self, input: &str) -> Vec<Effect> {
+        let Some(target) = parse_address(input) else {
+            return Vec::new();
         };
         let id = self.workspaces.current().active;
-        self.workspaces.set_location(id, &title, stripped, &url);
-        vec![Effect::Load(id, url)]
+        self.workspaces
+            .set_location(id, &target.title, &target.display, &target.url);
+        self.address_draft = None;
+        vec![Effect::Load(id, target.url)]
     }
 
     // ---- palette ------------------------------------------------------------

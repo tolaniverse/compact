@@ -52,6 +52,10 @@ struct Inner {
     /// True while a workspace transition is travelling, so `render` leaves the
     /// pages where the animation put them.
     sliding: bool,
+    /// Focus requested by the last action, applied after the render that makes
+    /// the target visible. ⌘L reveals the address bar and focuses it in one
+    /// step; focusing first would target a hidden field.
+    pending_focus: Option<Focus>,
     /// Tabs whose title we have already adopted at least once.
     ///
     /// A tab's *first* title is just its page loading, which is not news — and
@@ -89,18 +93,10 @@ impl Inner {
                     let _ = self.engine.hibernate(id);
                 }
                 Effect::Destroy(id) => self.engine.destroy(id),
-                Effect::FocusAddressField => {
-                    let f = self.chrome.address_field.clone();
-                    unsafe {
-                        self.window.makeFirstResponder(Some(&f));
-                        let _: () = msg_send![&*f, selectText: std::ptr::null::<objc2::runtime::AnyObject>()];
-                    }
-                }
-                Effect::FocusPaletteField => {
-                    let f = self.overlays.palette_field.clone();
-                    f.setStringValue(&NSString::from_str(""));
-                    self.window.makeFirstResponder(Some(&f));
-                }
+                // Deferred: the render that follows is what makes these
+                // visible, and focusing a hidden field does nothing.
+                Effect::FocusAddressField => self.pending_focus = Some(Focus::Address),
+                Effect::FocusPaletteField => self.pending_focus = Some(Focus::Palette),
                 Effect::SlideWorkspace(dir) => {
                     // Sampled here, before the tab's own Load/Restore effects
                     // run, so it reflects whether the destination already had a
@@ -216,8 +212,31 @@ impl Inner {
 
     fn dispatch(&mut self, action: Action) {
         let fx = self.app.apply(action);
+        self.settle(fx);
+    }
+
+    /// Carry out effects, redraw, then hand over the keyboard.
+    ///
+    /// The order is load-bearing and easy to get wrong piecemeal, so every path
+    /// that produces effects goes through here rather than repeating it.
+    fn settle(&mut self, fx: Vec<Effect>) {
         self.perform(fx);
         self.render();
+        self.apply_focus();
+    }
+
+    /// Hand the keyboard to whatever the last action asked for, now that the
+    /// render has made it visible.
+    fn apply_focus(&mut self) {
+        match self.pending_focus.take() {
+            None => {}
+            Some(Focus::Address) => self.chrome.focus_address(&self.window),
+            Some(Focus::Palette) => {
+                let f = self.overlays.palette_field.clone();
+                f.setStringValue(&NSString::from_str(""));
+                self.window.makeFirstResponder(Some(&f));
+            }
+        }
     }
 }
 
@@ -306,6 +325,7 @@ impl Shell {
             census: compact_mem::WebKitCensus::baseline(),
             self_ref: std::rc::Weak::new(),
             sliding: false,
+            pending_focus: None,
             titled: std::collections::HashSet::new(),
         }));
         inner.borrow_mut().self_ref = Rc::downgrade(&inner);
@@ -326,8 +346,7 @@ impl Shell {
             i.app.workspaces.set_state(active, compact_core::tab::TabState::Live);
             let mut fx = vec![Effect::Load(active, url)];
             fx.extend(i.app.reconcile());
-            i.perform(fx);
-            i.render();
+            i.settle(fx);
         }
 
         install_monitors(&inner);
@@ -372,13 +391,7 @@ fn install_monitors(inner: &Rc<RefCell<Inner>>) {
 
         // A focused text field owns most keys; only the bindings that must work
         // while typing are intercepted ahead of it.
-        let editing = i.app.overlay == Overlay::Palette
-            || i.window.firstResponder()
-                .map(|r| {
-                    let f: *const _ = &*i.chrome.address_field;
-                    std::ptr::eq(&*r as *const _ as *const u8, f as *const u8)
-                })
-                .unwrap_or(false);
+        let editing = i.app.overlay == Overlay::Palette || i.chrome.address_editing();
 
         // Palette navigation.
         if i.app.overlay == Overlay::Palette {
@@ -397,8 +410,7 @@ fn install_monitors(inner: &Rc<RefCell<Inner>>) {
                     let q = i.overlays.palette_field.stringValue().to_string();
                     i.app.set_query(q);
                     let fx = i.app.run_selected();
-                    i.perform(fx);
-                    i.render();
+                    i.settle(fx);
                     return std::ptr::null_mut();
                 }
                 _ => {}
@@ -415,12 +427,14 @@ fn install_monitors(inner: &Rc<RefCell<Inner>>) {
 
         // Address bar commit.
         if editing && (chars == "\r" || chars == "\u{3}") && i.app.overlay != Overlay::Palette {
-            let v = i.chrome.address_field.stringValue().to_string();
-            i.app.set_address_draft(v);
-            let fx = i.app.commit_address();
+            let typed = i.chrome.address_text();
+            let fx = i.app.navigate(&typed);
             i.perform(fx);
+            // Give the keyboard back to the page; leaving it in the field means
+            // the next keystroke edits the URL instead of reaching the site.
             i.window.makeFirstResponder(None);
             i.render();
+            i.apply_focus();
             return std::ptr::null_mut();
         }
 
@@ -503,8 +517,7 @@ fn install_monitors(inner: &Rc<RefCell<Inner>>) {
                     Some(idx) => {
                         i.app.selection = idx;
                         let fx = i.app.run_selected();
-                        i.perform(fx);
-                        i.render();
+                        i.settle(fx);
                     }
                     None => i.dispatch(Action::Dismiss),
                 }
@@ -525,8 +538,7 @@ fn install_monitors(inner: &Rc<RefCell<Inner>>) {
                 // Opening a notification jumps to its workspace and focuses the
                 // tab it came from.
                 let fx = i.app.open_notification(id);
-                i.perform(fx);
-                i.render();
+                i.settle(fx);
             }
             return std::ptr::null_mut();
         }
@@ -728,4 +740,11 @@ fn install_menu(mtm: MainThreadMarker, app: &NSApplication) {
     app_item.setSubmenu(Some(&app_menu));
 
     app.setMainMenu(Some(&menubar));
+}
+
+/// What should receive the keyboard after the next render.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Focus {
+    Address,
+    Palette,
 }

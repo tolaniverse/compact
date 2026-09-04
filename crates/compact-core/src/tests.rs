@@ -365,6 +365,83 @@ fn budget_is_global_across_workspaces() {
     assert_eq!(live_after, 2, "9 live tabs across 3 workspaces shed to the ceiling");
 }
 
+// ---- address parsing -----------------------------------------------------
+
+#[test]
+fn bare_hosts_become_https_urls() {
+    for (input, url, display) in [
+        ("example.com", "https://example.com", "example.com"),
+        ("docs.internal/spec", "https://docs.internal/spec", "docs.internal/spec"),
+        ("https://a.test/x?y=1", "https://a.test/x?y=1", "a.test/x?y=1"),
+        ("http://a.test", "http://a.test", "a.test"),
+        ("localhost:8080", "https://localhost:8080", "localhost:8080"),
+    ] {
+        let t = crate::parse_address(input).expect(input);
+        assert_eq!(t.url, url, "input {input}");
+        assert_eq!(t.display, display, "input {input}");
+    }
+}
+
+#[test]
+fn plain_words_become_a_search() {
+    // A single bar has to serve both, and "rust ownership" is unambiguously
+    // not an address.
+    let t = crate::parse_address("rust ownership").unwrap();
+    assert_eq!(t.url, "https://duckduckgo.com/?q=rust+ownership");
+    assert_eq!(t.display, "rust ownership", "the bar keeps what was typed");
+}
+
+#[test]
+fn a_dotless_word_is_a_search_not_a_host() {
+    let t = crate::parse_address("bookmarks").unwrap();
+    assert!(t.url.starts_with("https://duckduckgo.com/?q="));
+}
+
+#[test]
+fn search_queries_are_percent_encoded() {
+    let t = crate::parse_address("c++ & rust").unwrap();
+    assert_eq!(t.url, "https://duckduckgo.com/?q=c%2B%2B+%26+rust");
+}
+
+#[test]
+fn a_url_with_spaces_is_treated_as_a_search() {
+    // Whitespace rules out an address even when a dot is present.
+    let t = crate::parse_address("what is example.com").unwrap();
+    assert!(t.url.contains("duckduckgo.com"));
+}
+
+#[test]
+fn malformed_hosts_are_searched_rather_than_loaded() {
+    for input in [".com", "example."] {
+        let t = crate::parse_address(input).unwrap();
+        assert!(t.url.contains("duckduckgo.com"), "input {input}");
+    }
+}
+
+#[test]
+fn titles_drop_www_and_the_tld() {
+    assert_eq!(crate::parse_address("www.github.com").unwrap().title, "Github");
+    assert_eq!(crate::parse_address("rust-lang.org").unwrap().title, "Rust-lang");
+}
+
+#[test]
+fn blank_input_goes_nowhere() {
+    assert!(crate::parse_address("   ").is_none());
+    assert!(crate::parse_address("").is_none());
+}
+
+#[test]
+fn navigating_updates_the_tab_and_clears_the_draft() {
+    let mut app = App::new();
+    app.set_address_draft("half-typed");
+    let fx = app.navigate("rust-lang.org");
+    assert!(app.address_draft.is_none(), "the field returns to mirroring the tab");
+    assert_eq!(app.workspaces.current().active_tab().host, "rust-lang.org");
+    assert_eq!(app.address_text(), "rust-lang.org");
+    let Some(Effect::Load(_, url)) = fx.first() else { panic!("expected a load") };
+    assert_eq!(url, "https://rust-lang.org");
+}
+
 #[test]
 fn address_commit_normalizes_and_navigates() {
     let mut app = App::new();

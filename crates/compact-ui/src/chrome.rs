@@ -356,6 +356,32 @@ impl Chrome {
         self.size = size;
     }
 
+    /// Whether the address field currently has the keyboard.
+    ///
+    /// Checked through `currentEditor`, not by comparing the window's first
+    /// responder to the field: AppKit hands editing to a shared field editor,
+    /// so the field itself is never the first responder while being typed into.
+    pub fn address_editing(&self) -> bool {
+        self.address_field.currentEditor().is_some()
+    }
+
+    /// Put the keyboard in the address field and select what is there, so
+    /// typing replaces the URL rather than appending to it.
+    pub fn focus_address(&self, window: &objc2_app_kit::NSWindow) {
+        window.makeFirstResponder(Some(&self.address_field));
+        unsafe {
+            let _: () = objc2::msg_send![
+                &*self.address_field,
+                selectText: std::ptr::null::<objc2::runtime::AnyObject>()
+            ];
+        }
+    }
+
+    /// The text currently in the address field.
+    pub fn address_text(&self) -> String {
+        self.address_field.stringValue().to_string()
+    }
+
     /// Update what the cursor is over. Returns true if it changed.
     pub fn set_hover(&mut self, h: Option<Hit>) -> bool {
         let changed = self.hover != h;
@@ -457,7 +483,10 @@ impl Chrome {
             self.address_field
                 .setFrame(rect(28.0, (ah - 18.0) / 2.0, aw - kbd_w - star_w - 44.0, 18.0));
             // Only overwrite the field while the user is not editing it.
-            if app.address_draft.is_none() {
+            // Never overwrite the field while the user is in it. Renders fire
+            // on every cursor move, so without this check a redraw mid-word
+            // replaces what has been typed with the current tab's host.
+            if app.address_draft.is_none() && !self.address_editing() {
                 let s = objc2_foundation::NSString::from_str(app.address_text());
                 self.address_field.setStringValue(&s);
             }
