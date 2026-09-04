@@ -15,7 +15,7 @@ use objc2::rc::Retained;
 use objc2::{msg_send, MainThreadMarker, MainThreadOnly};
 use objc2_app_kit::{
     NSApplication, NSApplicationActivationPolicy, NSBackingStoreType, NSColor, NSEvent,
-    NSEventMask, NSEventModifierFlags, NSEventType, NSView, NSWindow, NSWindowButton,
+    NSEventMask, NSEventModifierFlags, NSEventType, NSView, NSWindow, NSTitlebarSeparatorStyle, NSWindowButton,
     NSWindowStyleMask,
     NSWindowTitleVisibility,
 };
@@ -284,10 +284,20 @@ impl Shell {
         )));
         window.setAcceptsMouseMovedEvents(true);
         window.center();
-        // No close or minimise. Compact is keyboard-first and its chrome is
-        // hidden by default; two permanently-visible buttons sitting over the
-        // page undercut that. ⌘W closes a tab, ⌘Q quits, ⌘H hides.
-        for b in [NSWindowButton::CloseButton, NSWindowButton::MiniaturizeButton] {
+        // No titlebar at all. The window is content edge to edge: the style
+        // mask still says Titled so the window keeps its rounded corners,
+        // shadow and resize edges, but the bar itself is transparent, its title
+        // hidden, its separator suppressed, and all three buttons removed.
+        //
+        // Compact is keyboard-first with chrome hidden by default, so a
+        // permanent strip of controls over the page works against the whole
+        // premise. ⌘W closes a tab, ⌘Q quits, ⌘H hides, ⌃⌘F is fullscreen.
+        window.setTitlebarSeparatorStyle(NSTitlebarSeparatorStyle::None);
+        for b in [
+            NSWindowButton::CloseButton,
+            NSWindowButton::MiniaturizeButton,
+            NSWindowButton::ZoomButton,
+        ] {
             if let Some(button) = window.standardWindowButton(b) {
                 button.setHidden(true);
             }
@@ -579,7 +589,10 @@ fn install_monitors(inner: &Rc<RefCell<Inner>>) {
             Some(Hit::Settings) => i.dispatch(Action::OpenSettings),
             Some(Hit::Palette) => i.dispatch(Action::OpenPalette),
             Some(Hit::Address) => i.dispatch(Action::FocusAddress),
-            Some(Hit::Chrome) => {}
+            // Chrome, but not a control. Hand it back: with no titlebar there
+            // is nothing else to grab, so `movableByWindowBackground` dragging
+            // the sidebar or strip is the only way to move the window.
+            Some(Hit::Chrome) => return event as *const NSEvent as *mut NSEvent,
             // Not on chrome: let the page have it.
             None => return event as *const NSEvent as *mut NSEvent,
         }
@@ -767,6 +780,20 @@ fn install_menu(mtm: MainThreadMarker, app: &NSApplication) {
             &NSString::from_str("q"),
         )
     };
+    let fullscreen = unsafe {
+        NSMenuItem::initWithTitle_action_keyEquivalent(
+            NSMenuItem::alloc(mtm),
+            &NSString::from_str("Toggle Full Screen"),
+            Some(objc2::sel!(toggleFullScreen:)),
+            &NSString::from_str("f"),
+        )
+    };
+    // ⌃⌘F, the system-standard binding — it replaces what the zoom button did.
+    fullscreen.setKeyEquivalentModifierMask(
+        objc2_app_kit::NSEventModifierFlags::Control | objc2_app_kit::NSEventModifierFlags::Command,
+    );
+    app_menu.addItem(&fullscreen);
+    app_menu.addItem(&NSMenuItem::separatorItem(mtm));
     app_menu.addItem(&hide);
     app_menu.addItem(&NSMenuItem::separatorItem(mtm));
     app_menu.addItem(&quit);
