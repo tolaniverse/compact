@@ -138,15 +138,26 @@ pub struct ChromeVisibility {
 }
 
 impl ChromeVisibility {
-    pub fn derive(reveal: Reveal, cfg: &ChromeConfig) -> Self {
-        let address = cfg.pinned || reveal.top;
+    /// Derive what to show.
+    ///
+    /// Each surface answers to exactly one thing, which is what keeps the
+    /// chrome predictable:
+    ///
+    /// - the **sidebar** to the left edge,
+    /// - the **strip** to the top edge,
+    /// - the **address bar** to being asked for, and nothing else.
+    ///
+    /// The address bar is deliberately not on hover. It floats over the page,
+    /// so on most sites it lands squarely on their own header — acceptable when
+    /// you summoned it and it leaves when you are done, intolerable when it
+    /// appears because the pointer drifted toward a site's own menu. Reaching
+    /// for the top edge also used to drag the sidebar out with it, which made
+    /// two unrelated surfaces move as one.
+    pub fn derive(reveal: Reveal, cfg: &ChromeConfig, address_summoned: bool) -> Self {
         Self {
-            address,
-            strip: cfg.layout == TabLayout::Horizontal && address,
-            // The sidebar also answers to the top edge: approaching the title
-            // area is a reach for chrome generally, and revealing only the
-            // address bar there would strand the tabs.
-            sidebar: cfg.layout == TabLayout::Vertical && (cfg.pinned || reveal.side || reveal.top),
+            address: cfg.pinned || address_summoned,
+            strip: cfg.layout == TabLayout::Horizontal && (cfg.pinned || reveal.top),
+            sidebar: cfg.layout == TabLayout::Vertical && (cfg.pinned || reveal.side),
         }
     }
 

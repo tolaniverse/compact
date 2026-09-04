@@ -124,6 +124,10 @@ pub struct Chrome {
     strip_layout_label: Layer,
     strip_gear: Layer,
 
+    /// Optional scrim over the page while chrome is out.
+    pub dim: Retained<NSView>,
+    dim_root: Layer,
+
     // Load progress, pinned to the window's top edge above all chrome.
     pub progress: Retained<NSView>,
     progress_root: Layer,
@@ -254,6 +258,13 @@ impl Chrome {
         let address_field = field(mtm, zero, 12.5, true, fg::INPUT);
         address.addSubview(&address_field);
 
+        // ---- page dim ----
+        // The settings panel has always offered this; it now does something.
+        // With the address bar floating over a site's own header, dimming is
+        // what separates "chrome is over the page" from "the page changed".
+        let (dim, dim_root) = host(mtm, zero);
+        set_host_fill(host_layer(&*dim), Rgba::new(0.0, 0.0, 0.0, 0.38));
+
         // ---- load progress ----
         let (progress, progress_root) = host(mtm, zero);
         // Gradient plus glow, matching the canvas. A flat bar at 2px reads as a
@@ -321,6 +332,8 @@ impl Chrome {
             strip_layout_label,
             strip_gear,
             address,
+            dim,
+            dim_root,
             progress,
             progress_root,
             progress_fill,
@@ -343,6 +356,8 @@ impl Chrome {
     /// Views to mount, back to front.
     pub fn views(&self) -> Vec<Retained<NSView>> {
         vec![
+            // Behind every other chrome surface, above the page.
+            self.dim.clone(),
             Retained::into_super(self.sidebar.clone()),
             Retained::into_super(self.strip.clone()),
             Retained::into_super(self.address.clone()),
@@ -489,6 +504,13 @@ impl Chrome {
             if app.address_draft.is_none() && !self.address_editing() {
                 let s = objc2_foundation::NSString::from_str(app.address_text());
                 self.address_field.setStringValue(&s);
+            }
+
+            let dimmed = cfg.dim_page && vis.any();
+            self.dim.setHidden(!dimmed);
+            if dimmed {
+                self.dim.setFrame(rect(0.0, 0.0, w, h));
+                set_frame(&self.dim_root, rect(0.0, 0.0, w, h));
             }
 
             self.sync_progress(app, w, h);

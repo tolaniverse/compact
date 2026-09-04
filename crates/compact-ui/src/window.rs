@@ -544,6 +544,15 @@ fn install_monitors(inner: &Rc<RefCell<Inner>>) {
         }
 
         let hit = i.chrome.hit(&i.app, x, y);
+
+        // Clicking anywhere that is not the address bar puts it away. It floats
+        // over the page, so it has to leave the moment attention does.
+        let on_address = matches!(hit, Some(Hit::Address) | Some(Hit::Palette) | Some(Hit::ToggleBookmark));
+        if !on_address && i.app.dismiss_address() {
+            i.window.makeFirstResponder(None);
+            i.render();
+        }
+
         match hit {
             Some(Hit::SelectTab(id)) => i.dispatch(Action::SelectTab(id)),
             Some(Hit::CloseTab(id)) => i.dispatch(Action::CloseTab(id)),

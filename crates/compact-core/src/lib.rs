@@ -181,6 +181,11 @@ pub struct App {
     /// they commit or the active tab changes.
     pub address_draft: Option<String>,
 
+    /// Whether the address bar has been asked for (⌘L, the palette, a click on
+    /// it). Cleared as soon as the user is done with it — on commit, on Escape,
+    /// or on clicking away — so it never lingers over the page.
+    pub address_summoned: bool,
+
     /// The onboarding hint, dismissed permanently on first real interaction.
     pub hint_visible: bool,
 
@@ -216,6 +221,7 @@ impl App {
             query: String::new(),
             selection: 0,
             address_draft: None,
+            address_summoned: false,
             hint_visible: true,
             clock: 0,
             measured_footprint: None,
@@ -225,7 +231,15 @@ impl App {
     // ---- derived view state -------------------------------------------------
 
     pub fn visibility(&self) -> ChromeVisibility {
-        ChromeVisibility::derive(self.reveal, &self.chrome)
+        ChromeVisibility::derive(self.reveal, &self.chrome, self.address_summoned)
+    }
+
+    /// Put the address bar away without navigating.
+    pub fn dismiss_address(&mut self) -> bool {
+        let was = self.address_summoned;
+        self.address_summoned = false;
+        self.address_draft = None;
+        was
     }
 
     /// What the address field should display right now.
@@ -301,6 +315,8 @@ impl App {
         match action {
             Action::Dismiss => {
                 self.overlay = Overlay::None;
+                self.address_summoned = false;
+                self.address_draft = None;
                 self.query.clear();
                 self.selection = 0;
             }
@@ -328,16 +344,17 @@ impl App {
                 self.hint_visible = false;
             }
             Action::FocusAddress => {
-                // Reveal the chrome first — focusing a hidden field would put
-                // the caret somewhere the user cannot see.
-                self.reveal.top = true;
+                // Summon it first — focusing a hidden field would put the caret
+                // somewhere the user cannot see.
+                self.address_summoned = true;
                 self.hint_visible = false;
                 fx.push(Effect::FocusAddressField);
             }
             Action::ToggleLayout => {
                 self.chrome.layout = self.chrome.layout.toggled();
                 // Show the result. Silently swapping hidden chrome gives no
-                // feedback that anything happened.
+                // feedback that anything happened. These are hover latches, so
+                // they clear again on the next mouse move.
                 self.reveal.top = true;
                 self.reveal.side = true;
                 self.hint_visible = false;
@@ -512,6 +529,8 @@ impl App {
         self.workspaces
             .set_location(id, &target.title, &target.display, &target.url);
         self.address_draft = None;
+        // Its job is done; leaving it up would cover the page you just asked for.
+        self.address_summoned = false;
         vec![Effect::Load(id, target.url)]
     }
 

@@ -197,27 +197,88 @@ fn update_reports_whether_anything_changed() {
 }
 
 #[test]
-fn sidebar_answers_to_the_top_edge_too() {
+fn each_surface_answers_to_one_thing() {
     let cfg = ChromeConfig::default();
-    let v = ChromeVisibility::derive(Reveal { top: true, side: false }, &cfg);
-    assert!(v.sidebar, "reaching for the title area should not strand the tabs");
-    assert!(v.address);
-    assert!(!v.strip, "vertical layout has no strip");
+    // Left edge is the sidebar's business and nothing else's.
+    let v = ChromeVisibility::derive(Reveal { top: false, side: true }, &cfg, false);
+    assert!(v.sidebar);
+    assert!(!v.address, "the sidebar must not drag the address bar out with it");
+
+    // Top edge is the strip's business. It must not summon the address bar,
+    // and in vertical layout it must not move the sidebar either.
+    let v = ChromeVisibility::derive(Reveal { top: true, side: false }, &cfg, false);
+    assert!(!v.sidebar, "reaching for the top edge should leave the tabs alone");
+    assert!(!v.address);
+}
+
+#[test]
+fn the_address_bar_never_appears_on_hover() {
+    // It floats over the page, so on most sites it lands on their own header.
+    // Tolerable when summoned; not when the pointer merely drifted upward.
+    let cfg = ChromeConfig::default();
+    for reveal in [
+        Reveal { top: true, side: false },
+        Reveal { top: false, side: true },
+        Reveal { top: true, side: true },
+    ] {
+        assert!(!ChromeVisibility::derive(reveal, &cfg, false).address);
+    }
+    assert!(ChromeVisibility::derive(Reveal::default(), &cfg, true).address);
+}
+
+#[test]
+fn the_strip_is_independent_of_the_address_bar() {
+    // Horizontal tabs must still come out on hover even though the address bar
+    // no longer does.
+    let cfg = ChromeConfig { layout: TabLayout::Horizontal, ..Default::default() };
+    let v = ChromeVisibility::derive(Reveal { top: true, side: false }, &cfg, false);
+    assert!(v.strip);
+    assert!(!v.address);
+    assert!(!v.sidebar, "horizontal layout has no sidebar");
 }
 
 #[test]
 fn pinning_shows_chrome_with_no_cursor_nearby() {
     let cfg = ChromeConfig { pinned: true, ..Default::default() };
-    let v = ChromeVisibility::derive(Reveal::default(), &cfg);
+    let v = ChromeVisibility::derive(Reveal::default(), &cfg, false);
     assert!(v.address && v.sidebar);
 }
 
 #[test]
-fn horizontal_layout_swaps_strip_for_sidebar() {
+fn the_address_bar_clears_the_strip_when_both_are_out() {
     let cfg = ChromeConfig { layout: TabLayout::Horizontal, ..Default::default() };
-    let v = ChromeVisibility::derive(Reveal { top: true, side: true }, &cfg);
-    assert!(v.strip && !v.sidebar);
-    assert_eq!(v.address_top(), 58.0, "address bar clears the strip");
+    let v = ChromeVisibility::derive(Reveal { top: true, side: false }, &cfg, true);
+    assert!(v.strip && v.address);
+    assert_eq!(v.address_top(), 58.0);
+    let alone = ChromeVisibility::derive(Reveal::default(), &cfg, true);
+    assert_eq!(alone.address_top(), 14.0, "nothing above it to clear");
+}
+
+#[test]
+fn summoning_the_address_bar_does_not_move_other_chrome() {
+    let mut app = App::new();
+    app.apply(Action::FocusAddress);
+    let v = app.visibility();
+    assert!(v.address);
+    assert!(!v.sidebar, "⌘L is about the address bar, not the tabs");
+}
+
+#[test]
+fn the_address_bar_leaves_when_it_is_done() {
+    // It covers the site's own header, so it must not outlive its purpose.
+    let mut app = App::new();
+    app.apply(Action::FocusAddress);
+    assert!(app.visibility().address);
+    app.navigate("example.com");
+    assert!(!app.visibility().address, "navigating puts it away");
+
+    app.apply(Action::FocusAddress);
+    app.apply(Action::Dismiss);
+    assert!(!app.visibility().address, "Escape puts it away");
+
+    app.apply(Action::FocusAddress);
+    assert!(app.dismiss_address(), "clicking away puts it away");
+    assert!(!app.visibility().address);
 }
 
 #[test]
