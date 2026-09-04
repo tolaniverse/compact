@@ -121,6 +121,13 @@ pub fn set_frame(l: &Layer, f: CGRect) {
     }
 }
 
+/// Set a layer's opacity.
+pub fn set_opacity(l: &Layer, v: f64) {
+    unsafe {
+        let _: () = msg_send![&**l, setOpacity: v as f32];
+    }
+}
+
 pub fn set_hidden(l: &Layer, v: bool) {
     unsafe {
         let _: () = msg_send![&**l, setHidden: v];

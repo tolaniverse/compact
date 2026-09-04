@@ -52,6 +52,12 @@ struct Inner {
     /// True while a workspace transition is travelling, so `render` leaves the
     /// pages where the animation put them.
     sliding: bool,
+    /// Tabs whose title we have already adopted at least once.
+    ///
+    /// A tab's *first* title is just its page loading, which is not news — and
+    /// with background workspaces prewarmed, notifying on it would greet the
+    /// user with a toast per tab at launch. Only later changes are events.
+    titled: std::collections::HashSet<TabId>,
 }
 
 impl Inner {
@@ -300,6 +306,7 @@ impl Shell {
             census: compact_mem::WebKitCensus::baseline(),
             self_ref: std::rc::Weak::new(),
             sliding: false,
+            titled: std::collections::HashSet::new(),
         }));
         inner.borrow_mut().self_ref = Rc::downgrade(&inner);
 
@@ -510,6 +517,20 @@ fn install_monitors(inner: &Rc<RefCell<Inner>>) {
             Overlay::None => {}
         }
 
+        if let Some((id, dismiss)) = i.chrome.toast_hit(&i.app, x, y) {
+            if dismiss {
+                i.app.notifications.dismiss(id);
+                i.render();
+            } else {
+                // Opening a notification jumps to its workspace and focuses the
+                // tab it came from.
+                let fx = i.app.open_notification(id);
+                i.perform(fx);
+                i.render();
+            }
+            return std::ptr::null_mut();
+        }
+
         let hit = i.chrome.hit(&i.app, x, y);
         match hit {
             Some(Hit::SelectTab(id)) => i.dispatch(Action::SelectTab(id)),
@@ -553,29 +574,46 @@ fn install_ticker(inner: &Rc<RefCell<Inner>>) {
         let now = i.now_ms();
         let mut dirty = i.app.notifications.expire(now);
 
-        // Adopt real page titles as navigations settle.
-        let ids: Vec<_> = i.app.workspaces.current().tabs.iter().map(|t| t.id).collect();
-        for id in ids {
-            if let Some(title) = i.engine.title(id) {
-                let cur = i
-                    .app
-                    .workspaces
-                    .locate(id)
-                    .map(|(_, t)| t.title.clone())
-                    .unwrap_or_default();
-                if cur != title {
-                    let url = i.engine.url(id).unwrap_or_default();
-                    let host = url
-                        .split("://")
-                        .nth(1)
-                        .unwrap_or(&url)
-                        .split('/')
-                        .next()
-                        .unwrap_or("")
-                        .to_string();
-                    i.app.workspaces.set_location(id, &title, &host, &url);
-                    dirty = true;
-                }
+        // Adopt real page titles as navigations settle — across every
+        // workspace, not just the visible one. A background workspace changing
+        // under you is precisely what the notification stack is for.
+        let ids: Vec<(usize, TabId)> = i
+            .app
+            .workspaces
+            .spaces
+            .iter()
+            .enumerate()
+            .flat_map(|(w, ws)| ws.tabs.iter().map(move |t| (w, t.id)))
+            .collect();
+        let current_ws = i.app.workspaces.current;
+        for (ws, id) in ids {
+            let Some(title) = i.engine.title(id) else { continue };
+            let cur = i
+                .app
+                .workspaces
+                .locate(id)
+                .map(|(_, t)| t.title.clone())
+                .unwrap_or_default();
+            if cur == title {
+                continue;
+            }
+            let url = i.engine.url(id).unwrap_or_default();
+            let host = url
+                .split("://")
+                .nth(1)
+                .unwrap_or(&url)
+                .split('/')
+                .next()
+                .unwrap_or("")
+                .to_string();
+            i.app.workspaces.set_location(id, &title, &host, &url);
+            dirty = true;
+
+            // `insert` reports true the first time, which is the initial load.
+            let first_load = i.titled.insert(id);
+            if !first_load && ws != current_ws {
+                i.app.notifications.push(ws, title, host, id, now);
+                i.app.workspaces.add_unread(ws);
             }
         }
 

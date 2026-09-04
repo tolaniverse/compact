@@ -194,6 +194,8 @@ pub mod duration {
     pub const CARD: f64 = 0.30;
     /// Hint breathing cycle.
     pub const BREATHE: f64 = 3.4;
+    /// Toast arrival.
+    pub const TOAST_IN: f64 = 0.42;
     /// Toast lifetime before auto-dismiss.
     pub const TOAST_LIFETIME: f64 = 7.0;
 }

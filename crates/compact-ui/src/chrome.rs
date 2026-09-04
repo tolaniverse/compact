@@ -46,6 +46,7 @@ struct Toast {
     body: Layer,
     source: Layer,
     action: Layer,
+    close: Layer,
 }
 
 impl Toast {
@@ -62,11 +63,12 @@ impl Toast {
         let body = text("", 12.5, fg::INPUT, false, Align::Left);
         let source = text("", 11.0, fg::MUTED, false, Align::Left);
         let action = text("", 9.5, fg::SECONDARY, true, Align::Right);
-        for l in [&dot, &ws, &age, &body, &source, &action] {
+        let close = text("×", 13.0, fg::DIM, false, Align::Center);
+        for l in [&dot, &ws, &age, &body, &source, &action, &close] {
             add_sublayer(&root, l);
         }
         add_sublayer(parent, &root);
-        Self { root, dot, ws, age, body, source, action }
+        Self { root, dot, ws, age, body, source, action, close }
     }
 }
 
@@ -74,6 +76,8 @@ pub struct Chrome {
     size: (f64, f64),
     /// What the cursor is currently over, for hover tinting.
     hover: Option<Hit>,
+    /// Toast ids presented last sync, so arrivals animate and the rest do not.
+    shown_toasts: Vec<u64>,
     /// Last visibility pushed to the layers.
     ///
     /// Chrome position animates, but content does not: a tab title must not
@@ -253,6 +257,7 @@ impl Chrome {
         Self {
             size,
             hover: None,
+            shown_toasts: Vec::new(),
             last_vis: None,
             sidebar,
             sidebar_root,
@@ -596,21 +601,38 @@ impl Chrome {
             let t = Toast::new(&self.toast_root);
             self.toasts.push(t);
         }
+        let previously = std::mem::take(&mut self.shown_toasts);
+        self.shown_toasts = items.iter().map(|n| n.id).collect();
         for (i, toast) in self.toasts.iter().enumerate() {
             match items.get(i) {
                 None => set_hidden(&toast.root, true),
                 Some(n) => {
-                    // Newest at the bottom, matching `column-reverse`.
+                    // `column-reverse`: the newest toast is on top and older
+                    // ones settle beneath it.
                     let ty = (items.len() - 1 - i) as f64 * (th + 9.0);
+                    // An arriving toast rises into place; ones already on
+                    // screen just move as the stack reflows.
+                    if !previously.contains(&n.id) {
+                        without_animation(|| {
+                            set_frame(&toast.root, rect(0.0, ty + 18.0, tw, th));
+                            set_opacity(&toast.root, 0.0);
+                        });
+                    }
+                    animated(compact_core::theme::duration::TOAST_IN, || {
+                        set_frame(&toast.root, rect(0.0, ty, tw, th));
+                        set_opacity(&toast.root, 1.0);
+                    });
                     let dot = app.workspaces.spaces[n.workspace].dot;
                     set_hidden(&toast.root, false);
-                    set_frame(&toast.root, rect(0.0, ty, tw, th));
                     set_fill(&toast.dot, dot);
                     set_frame(&toast.ws, rect(27.0, 12.0, 120.0, 13.0));
                     set_text(&toast.ws, &app.workspaces.spaces[n.workspace].name.to_uppercase());
                     set_color(&toast.ws, dot);
-                    set_frame(&toast.age, rect(tw - 60.0, 12.0, 46.0, 13.0));
+                    // Age sits left of the dismiss glyph, which is the
+                    // rightmost thing in the header.
+                    set_frame(&toast.age, rect(tw - 76.0, 12.0, 46.0, 13.0));
                     set_text(&toast.age, &n.age_label(now));
+                    set_frame(&toast.close, rect(tw - 29.0, 11.0, 16.0, 16.0));
                     set_frame(&toast.body, rect(13.0, 32.0, tw - 26.0, 18.0));
                     set_text(&toast.body, &n.text);
                     set_frame(&toast.source, rect(13.0, 58.0, tw - 110.0, 15.0));
@@ -620,6 +642,38 @@ impl Chrome {
                 }
             }
         }
+    }
+
+    /// Hit-test the toast stack. Returns the notification and whether the
+    /// click landed on its dismiss affordance rather than its body.
+    ///
+    /// Tested before the rest of the chrome because toasts float above
+    /// everything else and are the topmost thing under the cursor.
+    pub fn toast_hit(&self, app: &App, x: f64, y: f64) -> Option<(u64, bool)> {
+        let (w, h) = self.size;
+        let items = app.notifications.items();
+        if items.is_empty() || app.overlay != Overlay::None {
+            return None;
+        }
+        let tw = metric::TOAST_WIDTH;
+        let th = 86.0;
+        let stack_h = items.len() as f64 * (th + 9.0);
+        let x0 = w - tw - 16.0;
+        // The host view is bottom-anchored; convert to a top-left offset.
+        let top = h - 16.0 - stack_h;
+        if x < x0 || x > x0 + tw || y < top || y > top + stack_h {
+            return None;
+        }
+        let lx = x - x0;
+        for (i, n) in items.iter().enumerate() {
+            // Newest sits at the bottom, so index maps to reverse order.
+            let ty = top + (items.len() - 1 - i) as f64 * (th + 9.0);
+            if y >= ty && y < ty + th {
+                let dismiss = lx > tw - 32.0 && (y - ty) < 30.0;
+                return Some((n.id, dismiss));
+            }
+        }
+        None
     }
 
     /// Hit-test the chrome. Returns what the click landed on, in window

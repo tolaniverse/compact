@@ -506,6 +506,67 @@ fn toast_labels_read_correctly() {
 }
 
 #[test]
+fn opening_a_toast_from_another_workspace_travels_to_it() {
+    let mut app = App::new();
+    let target = app.workspaces.spaces[2].tabs[1].id;
+    let id = app.notifications.push(2, "Benchmark run finished", "bench.dev", target, 0);
+    let fx = app.open_notification(id);
+    assert_eq!(app.workspaces.current, 2);
+    assert_eq!(app.workspaces.current().active, target);
+    assert!(fx.contains(&Effect::SlideWorkspace(1)), "a cross-workspace open slides");
+    assert!(app.notifications.is_empty());
+}
+
+#[test]
+fn opening_a_toast_from_this_workspace_just_focuses_the_tab() {
+    let mut app = App::new();
+    let target = app.workspaces.current().tabs[2].id;
+    let id = app.notifications.push(0, "Reading list synced", "read.later", target, 0);
+    let fx = app.open_notification(id);
+    assert_eq!(app.workspaces.current, 0, "no travel needed");
+    assert_eq!(app.workspaces.current().active, target);
+    assert!(!fx.iter().any(|e| matches!(e, Effect::SlideWorkspace(_))));
+}
+
+#[test]
+fn opening_an_unknown_toast_is_harmless() {
+    let mut app = App::new();
+    assert!(app.open_notification(999).is_empty());
+}
+
+#[test]
+fn other_workspaces_active_tabs_are_prewarmed() {
+    // A workspace switch lands on a whole different page, so arriving at an
+    // unpainted one is the most visible stall in the product.
+    let mut app = App::new();
+    let fx = app.reconcile();
+    for (i, ws) in app.workspaces.spaces.iter().enumerate() {
+        if i == app.workspaces.current {
+            continue;
+        }
+        let active = ws.active;
+        assert!(
+            fx.iter().any(|e| matches!(e, Effect::Load(id, _) | Effect::Restore(id) if *id == active)),
+            "workspace {i}'s active tab should be prewarmed"
+        );
+    }
+}
+
+#[test]
+fn prewarming_stops_at_the_budget() {
+    let mut app = App::new();
+    // Room for the active tab and nothing else.
+    app.budget = budget(100, 1, 1);
+    let active = app.workspaces.current().active;
+    app.workspaces.set_state(active, TabState::Live);
+    let fx = app.reconcile();
+    assert!(
+        !fx.iter().any(|e| matches!(e, Effect::Load(..) | Effect::Restore(..))),
+        "no headroom means no prewarming, however useful it would be"
+    );
+}
+
+#[test]
 fn arriving_in_a_workspace_clears_its_toasts() {
     let mut app = App::new();
     let tab = app.workspaces.spaces[1].tabs[0].id;
