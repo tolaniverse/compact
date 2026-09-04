@@ -83,6 +83,14 @@ pub struct TabMeta {
     /// [`ESTIMATED_LIVE_BYTES`] rather than zero — assuming zero would make the
     /// budget unenforceable exactly when measurement is failing.
     pub footprint: Option<u64>,
+    /// Whether a navigation is in flight.
+    pub loading: bool,
+    /// Navigation progress, 0.0 to 1.0.
+    ///
+    /// Fed from `WKWebView.estimatedProgress` — a real measurement, not the
+    /// canvas's scripted 0 → 62 → 100 timeline, which exists only because a
+    /// static mock has no page to report on.
+    pub progress: f64,
 }
 
 /// Fallback per-live-tab cost when measurement has not run yet.
@@ -104,6 +112,8 @@ impl TabMeta {
             state: TabState::Cold,
             last_active: 0,
             footprint: None,
+            loading: false,
+            progress: 0.0,
         }
     }
 

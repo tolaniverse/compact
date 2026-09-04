@@ -21,6 +21,9 @@ struct TabRow {
     dot: Layer,
     title: Layer,
     close: Layer,
+    /// Letter drawn inside `dot`, for bookmark chips. Hidden for tabs, whose
+    /// dot is a plain status marker.
+    initial: Layer,
 }
 
 impl TabRow {
@@ -29,11 +32,14 @@ impl TabRow {
         let dot = panel(rect(0.0, 0.0, 5.0, 5.0), fill::INACTIVE_DOT, 2.5, None);
         let title = text("", 12.5, fg::SECONDARY, false, Align::Left);
         let close = text("×", 13.0, fg::DIM, false, Align::Center);
+        let initial = text("", 8.5, bg::WINDOW, true, Align::Center);
+        set_hidden(&initial, true);
+        add_sublayer(&dot, &initial);
         add_sublayer(&root, &dot);
         add_sublayer(&root, &title);
         add_sublayer(&root, &close);
         add_sublayer(parent, &root);
-        Self { root, dot, title, close }
+        Self { root, dot, title, close, initial }
     }
 }
 
@@ -96,6 +102,11 @@ pub struct Chrome {
     side_new_tab: Layer,
     side_new_label: Layer,
     side_new_hint: Layer,
+    bookmark_label: Layer,
+    bookmark_hint: Layer,
+    bookmark_rows: Vec<TabRow>,
+    strip_bookmarks: Vec<Layer>,
+    strip_divider: Layer,
     side_layout_btn: Layer,
     side_layout_label: Layer,
     side_gear: Layer,
@@ -113,10 +124,16 @@ pub struct Chrome {
     strip_layout_label: Layer,
     strip_gear: Layer,
 
+    // Load progress, pinned to the window's top edge above all chrome.
+    pub progress: Retained<NSView>,
+    progress_root: Layer,
+    progress_fill: Layer,
+
     // Address bar.
     pub address: Retained<NSVisualEffectView>,
     address_root: Layer,
     address_icon: Layer,
+    address_star: Layer,
     pub address_field: Retained<NSTextField>,
     address_kbd: Layer,
     address_kbd_label: Layer,
@@ -200,12 +217,15 @@ impl Chrome {
         let side_layout_label = text("LAYOUT", 9.5, fg::MUTED, true, Align::Center);
         let side_gear = panel(zero, Rgba::white(0.0), 7.0, Some((border::CARD, 1.0)));
         let side_gear_label = text("⚙", 13.0, fg::MUTED, false, Align::Center);
+        let bookmark_label = text("BOOKMARKS", 9.5, fg::DIM, true, Align::Left);
+        let bookmark_hint = text("⌘D", 9.5, fg::FAINT, true, Align::Right);
+        let strip_divider = panel(zero, Rgba::white(0.1), 0.0, None);
         let elsewhere_label = text("ELSEWHERE", 9.5, fg::DIM, true, Align::Left);
         let elsewhere_hint = text("⌘⇧J", 9.5, fg::FAINT, true, Align::Right);
         for l in [
             &ws_dot, &ws_name, &ws_count, &side_new_tab, &side_new_label, &side_new_hint,
             &side_layout_btn, &side_layout_label, &side_gear, &side_gear_label,
-            &elsewhere_label, &elsewhere_hint,
+            &elsewhere_label, &elsewhere_hint, &bookmark_label, &bookmark_hint,
         ] {
             add_sublayer(&sidebar_root, l);
         }
@@ -217,7 +237,7 @@ impl Chrome {
         let strip_layout = panel(zero, Rgba::white(0.0), 7.0, Some((border::CARD, 1.0)));
         let strip_layout_label = text("LAYOUT", 10.0, fg::MUTED, true, Align::Center);
         let strip_gear = text("⚙", 13.0, fg::MUTED, false, Align::Center);
-        for l in [&strip_plus, &strip_layout, &strip_layout_label, &strip_gear] {
+        for l in [&strip_plus, &strip_layout, &strip_layout_label, &strip_gear, &strip_divider] {
             add_sublayer(&strip_root, l);
         }
 
@@ -225,13 +245,26 @@ impl Chrome {
         let address = blur_view(mtm, zero, radius::ADDRESS);
         let address_root = flip_host(&address);
         let address_icon = text("⌁", 10.0, fg::DIM, false, Align::Center);
+        let address_star = text("☆", 12.0, fg::MUTED, false, Align::Center);
         let address_kbd = panel(zero, Rgba::white(0.0), 7.0, Some((Rgba::white(0.09), 1.0)));
         let address_kbd_label = text("⌘K", 10.0, fg::MUTED, true, Align::Center);
-        for l in [&address_icon, &address_kbd, &address_kbd_label] {
+        for l in [&address_icon, &address_star, &address_kbd, &address_kbd_label] {
             add_sublayer(&address_root, l);
         }
         let address_field = field(mtm, zero, 12.5, true, fg::INPUT);
         address.addSubview(&address_field);
+
+        // ---- load progress ----
+        let (progress, progress_root) = host(mtm, zero);
+        // Gradient plus glow, matching the canvas. A flat bar at 2px reads as a
+        // rendering artefact; the bloom is what makes it legible.
+        let progress_fill = gradient(
+            zero,
+            accent::PRIMARY.with_alpha(0.35),
+            accent::PRIMARY,
+        );
+        add_sublayer(&progress_root, &progress_fill);
+        glow(&progress_fill, accent::PRIMARY, 12.0);
 
         // ---- hint ----
         let (hint, hint_root) = host(mtm, zero);
@@ -268,6 +301,11 @@ impl Chrome {
             side_new_tab,
             side_new_label,
             side_new_hint,
+            bookmark_label,
+            bookmark_hint,
+            bookmark_rows: Vec::new(),
+            strip_bookmarks: Vec::new(),
+            strip_divider,
             side_layout_btn,
             side_layout_label,
             side_gear,
@@ -283,8 +321,12 @@ impl Chrome {
             strip_layout_label,
             strip_gear,
             address,
+            progress,
+            progress_root,
+            progress_fill,
             address_root,
             address_icon,
+            address_star,
             address_field,
             address_kbd,
             address_kbd_label,
@@ -304,6 +346,7 @@ impl Chrome {
             Retained::into_super(self.sidebar.clone()),
             Retained::into_super(self.strip.clone()),
             Retained::into_super(self.address.clone()),
+            self.progress.clone(),
             self.hint.clone(),
             self.toast_host.clone(),
         ]
@@ -401,22 +444,51 @@ impl Chrome {
             set_host_border(host_layer(&*self.address), border::RAISED, 1.0);
             set_frame(&self.address_icon, rect(9.0, 14.0, 12.0, 14.0));
             let kbd_w = 44.0;
+            let star_w = 27.0;
             set_frame(&self.address_kbd, rect(aw - kbd_w - 6.0, 6.5, kbd_w, 27.0));
             set_frame(&self.address_kbd_label, rect(aw - kbd_w - 6.0, 14.0, kbd_w, 13.0));
+            // Star sits between the field and the ⌘K chip.
+            set_frame(&self.address_star, rect(aw - kbd_w - star_w - 8.0, 13.0, star_w, 16.0));
+            set_text(&self.address_star, app.star_glyph());
+            set_color(
+                &self.address_star,
+                if app.is_bookmarked() { accent::PRIMARY } else { fg::MUTED },
+            );
             self.address_field
-                .setFrame(rect(28.0, (ah - 18.0) / 2.0, aw - kbd_w - 42.0, 18.0));
+                .setFrame(rect(28.0, (ah - 18.0) / 2.0, aw - kbd_w - star_w - 44.0, 18.0));
             // Only overwrite the field while the user is not editing it.
             if app.address_draft.is_none() {
                 let s = objc2_foundation::NSString::from_str(app.address_text());
                 self.address_field.setStringValue(&s);
             }
 
+            self.sync_progress(app, w, h);
             self.sync_sidebar(app, h);
             self.sync_strip(app, w);
             self.sync_hint(app, w, h);
             self.sync_toasts(app, now, w, h);
 
             let _ = cfg;
+        });
+    }
+
+    /// The 2 px load bar across the top of the window.
+    fn sync_progress(&mut self, app: &App, w: f64, h: f64) {
+        let Some(p) = app.load_progress() else {
+            self.progress.setHidden(true);
+            // Reset so the next navigation grows from the left rather than
+            // continuing from wherever the last one stopped.
+            without_animation(|| set_frame(&self.progress_fill, rect(0.0, 0.0, 0.0, 2.0)));
+            return;
+        };
+        self.progress.setHidden(false);
+        self.progress.setFrame(rect(0.0, h - 2.0, w, 2.0));
+        set_frame(&self.progress_root, rect(0.0, 0.0, w, 2.0));
+        // The canvas snaps the final stretch — a completed load should not
+        // appear to keep working.
+        let dur = if p >= 0.999 { 0.2 } else { 0.55 };
+        animated(dur, || {
+            set_frame(&self.progress_fill, rect(0.0, 0.0, w * p, 2.0));
         });
     }
 
@@ -431,6 +503,48 @@ impl Chrome {
         set_frame(&self.ws_count, rect(sw - 70.0, 50.0, 60.0, 13.0));
         set_text(&self.ws_count, &ws.count_label());
 
+        // Bookmarks sit above the tab list, as the canvas has them.
+        let marks = app.bookmarks.items();
+        let show_marks = !marks.is_empty();
+        set_hidden(&self.bookmark_label, !show_marks);
+        set_hidden(&self.bookmark_hint, !show_marks);
+        let mut list_top = 76.0;
+        if show_marks {
+            set_frame(&self.bookmark_label, rect(16.0, 74.0, 100.0, 13.0));
+            set_frame(&self.bookmark_hint, rect(sw - 50.0, 74.0, 30.0, 13.0));
+            list_top = 94.0 + marks.len() as f64 * 32.0 + 12.0;
+        }
+        while self.bookmark_rows.len() < marks.len() {
+            let r = TabRow::new(&self.sidebar_root, radius::TAB_SIDE);
+            self.bookmark_rows.push(r);
+        }
+        for (i, row) in self.bookmark_rows.iter().enumerate() {
+            match marks.get(i) {
+                None => set_hidden(&row.root, true),
+                Some(b) => {
+                    let y = 94.0 + i as f64 * 32.0;
+                    let hovered = self.hover == Some(Hit::Bookmark(b.id));
+                    set_hidden(&row.root, false);
+                    set_frame(&row.root, rect(10.0, y, inner, 30.0));
+                    animated(compact_core::theme::duration::HOVER, || {
+                        set_fill(&row.root, self.row_fill(false, hovered));
+                    });
+                    // The dot layer doubles as the tinted initial chip.
+                    set_frame(&row.dot, rect(9.0, 7.5, 15.0, 15.0));
+                    set_fill(&row.dot, b.tint);
+                    set_hidden(&row.initial, false);
+                    set_frame(&row.initial, rect(0.0, 3.0, 15.0, 11.0));
+                    set_text(&row.initial, &b.initial());
+                    set_frame(&row.title, rect(32.0, 7.5, inner - 60.0, 15.0));
+                    set_text(&row.title, &b.title);
+                    set_color(&row.title, fg::SECONDARY);
+                    set_frame(&row.close, rect(inner - 24.0, 7.0, 16.0, 16.0));
+                    set_text(&row.close, "×");
+                    set_color(&row.close, fg::DIM);
+                }
+            }
+        }
+
         // Tab rows.
         let n = ws.tabs.len();
         while self.side_rows.len() < n {
@@ -438,7 +552,7 @@ impl Chrome {
             self.side_rows.push(r);
         }
         let rh = metric::TAB_HEIGHT_SIDE;
-        let mut y = 76.0;
+        let mut y = list_top;
         for (i, row) in self.side_rows.iter().enumerate() {
             if i >= n {
                 set_hidden(&row.root, true);
@@ -455,6 +569,7 @@ impl Chrome {
             set_border(&row.root, if on { border::TAB_ACTIVE } else { Rgba::white(0.0) }, 1.0);
             set_frame(&row.dot, rect(9.0, (rh - 5.0) / 2.0, 5.0, 5.0));
             set_fill(&row.dot, if on { ws.dot } else { fill::INACTIVE_DOT });
+            set_hidden(&row.initial, true);
             set_frame(&row.title, rect(23.0, (rh - 15.0) / 2.0, inner - 50.0, 15.0));
             set_text(&row.title, &t.title);
             set_color(&row.title, if on { fg::PRIMARY } else { fg::SECONDARY });
@@ -553,6 +668,7 @@ impl Chrome {
             set_border(&row.root, if on { border::TAB_ACTIVE } else { Rgba::white(0.0) }, 1.0);
             set_frame(&row.dot, rect(9.0, (rh - 5.0) / 2.0, 5.0, 5.0));
             set_fill(&row.dot, if on { ws.dot } else { fill::INACTIVE_DOT });
+            set_hidden(&row.initial, true);
             set_frame(&row.title, rect(22.0, (rh - 15.0) / 2.0, tw - 46.0, 15.0));
             set_text(&row.title, &t.title);
             set_color(&row.title, if on { fg::PRIMARY } else { fg::SECONDARY });
@@ -564,6 +680,36 @@ impl Chrome {
         set_frame(&self.strip_layout, rect(w - 108.0, y + 1.5, 62.0, 26.0));
         set_frame(&self.strip_layout_label, rect(w - 108.0, y + 8.0, 62.0, 13.0));
         set_frame(&self.strip_gear, rect(w - 38.0, y + 5.0, 26.0, 18.0));
+
+        // Bookmarks as tinted initial chips, right-aligned before a divider.
+        // Squares rather than rows: the strip has no width to spare, and the
+        // tint plus initial is enough to recognise a handful of saved sites.
+        let marks = app.bookmarks.items();
+        while self.strip_bookmarks.len() < marks.len() {
+            let chip = panel(rect(0.0, 0.0, 22.0, 22.0), accent::PRIMARY, 6.0, None);
+            let label = text("", 9.5, bg::WINDOW, true, Align::Center);
+            add_sublayer(&chip, &label);
+            add_sublayer(&self.strip_root, &chip);
+            self.strip_bookmarks.push(chip);
+        }
+        let chips_w = marks.len() as f64 * 27.0;
+        let chips_x = w - 118.0 - chips_w;
+        for (i, chip) in self.strip_bookmarks.iter().enumerate() {
+            match marks.get(i) {
+                None => set_hidden(chip, true),
+                Some(b) => {
+                    set_hidden(chip, false);
+                    set_frame(chip, rect(chips_x + i as f64 * 27.0, y + 3.5, 22.0, 22.0));
+                    set_fill(chip, b.tint);
+                    if let Some(label) = first_sublayer(chip) {
+                        set_frame(&label, rect(0.0, 5.0, 22.0, 13.0));
+                        set_text(&label, &b.initial());
+                    }
+                }
+            }
+        }
+        set_hidden(&self.strip_divider, marks.is_empty());
+        set_frame(&self.strip_divider, rect(w - 116.0, y + 6.5, 1.0, 16.0));
     }
 
     fn sync_hint(&mut self, app: &App, w: f64, _h: f64) {
@@ -686,7 +832,21 @@ impl Chrome {
         if vis.sidebar && x < metric::SIDEBAR_WIDTH {
             let inner = metric::SIDEBAR_WIDTH - 20.0;
             let rh = metric::TAB_HEIGHT_SIDE;
+            let marks = app.bookmarks.items();
             let mut ry = 76.0;
+            if !marks.is_empty() {
+                for (i, b) in marks.iter().enumerate() {
+                    let by = 94.0 + i as f64 * 32.0;
+                    if y >= by && y < by + 30.0 && x >= 10.0 {
+                        return Some(if x > 10.0 + inner - 24.0 {
+                            Hit::RemoveBookmark(b.id)
+                        } else {
+                            Hit::Bookmark(b.id)
+                        });
+                    }
+                }
+                ry = 94.0 + marks.len() as f64 * 32.0 + 12.0;
+            }
             for t in &ws.tabs {
                 if y >= ry && y < ry + rh && x >= 10.0 {
                     return Some(if x > 10.0 + inner - 26.0 {
@@ -733,6 +893,14 @@ impl Chrome {
             if x >= plus_x && x < plus_x + 26.0 {
                 return Some(Hit::NewTab);
             }
+            let marks = app.bookmarks.items();
+            let chips_x = w - 118.0 - marks.len() as f64 * 27.0;
+            for (i, b) in marks.iter().enumerate() {
+                let cx = chips_x + i as f64 * 27.0;
+                if x >= cx && x < cx + 22.0 {
+                    return Some(Hit::Bookmark(b.id));
+                }
+            }
             if x > w - 108.0 && x < w - 46.0 {
                 return Some(Hit::ToggleLayout);
             }
@@ -747,7 +915,14 @@ impl Chrome {
             let ax = (w - aw) / 2.0;
             let atop = vis.address_top();
             if y >= atop && y < atop + metric::ADDRESS_HEIGHT && x >= ax && x < ax + aw {
-                return Some(if x > ax + aw - 56.0 { Hit::Palette } else { Hit::Address });
+                let from_right = ax + aw - x;
+                return Some(if from_right < 56.0 {
+                    Hit::Palette
+                } else if from_right < 85.0 {
+                    Hit::ToggleBookmark
+                } else {
+                    Hit::Address
+                });
             }
         }
         None
@@ -760,6 +935,12 @@ impl Chrome {
 pub enum Hit {
     SelectTab(compact_core::tab::TabId),
     CloseTab(compact_core::tab::TabId),
+    /// Navigate the active tab to a saved bookmark.
+    Bookmark(compact_core::bookmark::BookmarkId),
+    /// Forget a bookmark.
+    RemoveBookmark(compact_core::bookmark::BookmarkId),
+    /// Save or unsave the active tab.
+    ToggleBookmark,
     NewTab,
     ToggleLayout,
     Settings,

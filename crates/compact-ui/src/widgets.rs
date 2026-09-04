@@ -162,6 +162,61 @@ pub fn add_sublayer(parent: &Layer, child: &Layer) {
     }
 }
 
+/// A horizontal two-stop gradient layer.
+pub fn gradient(frame: CGRect, from: Rgba, to: Rgba) -> Layer {
+    unsafe {
+        let cls = objc2::runtime::AnyClass::get(c"CAGradientLayer").expect("CAGradientLayer");
+        let obj: *mut AnyObject = msg_send![cls, layer];
+        let l = Retained::retain(obj).expect("CAGradientLayer alloc");
+        let _: () = msg_send![&*l, setFrame: frame];
+        // `colors` wants CGColorRefs in an NSArray. They are CF types, not
+        // ObjC objects, so they go in as raw pointers rather than through a
+        // typed array.
+        let a = cg_color(from);
+        let b = cg_color(to);
+        // Typed as `id` pointers, not `void*`: `arrayWithObjects:count:`
+        // encodes its first argument as `^@` and objc2 checks that at runtime.
+        let ptrs: [*const AnyObject; 2] = [
+            Retained::as_ptr(&a).cast(),
+            Retained::as_ptr(&b).cast(),
+        ];
+        let ns = objc2::runtime::AnyClass::get(c"NSArray").expect("NSArray");
+        let colors: *mut AnyObject = msg_send![ns, arrayWithObjects: ptrs.as_ptr(), count: 2usize];
+        let _: () = msg_send![&*l, setColors: colors];
+        // Left to right.
+        let _: () = msg_send![&*l, setStartPoint: CGPoint::new(0.0, 0.5)];
+        let _: () = msg_send![&*l, setEndPoint: CGPoint::new(1.0, 0.5)];
+        l
+    }
+}
+
+/// Give a layer a coloured bloom.
+pub fn glow(l: &Layer, color: Rgba, radius: f64) {
+    unsafe {
+        let c = cg_color(color);
+        let _: () = msg_send![&**l, setShadowColor: &*c];
+        let _: () = msg_send![&**l, setShadowRadius: radius];
+        let _: () = msg_send![&**l, setShadowOpacity: 0.6f32];
+        let _: () = msg_send![&**l, setShadowOffset: CGSize::new(0.0, 0.0)];
+    }
+}
+
+/// A layer's first sublayer, if it has one.
+pub fn first_sublayer(l: &Layer) -> Option<Layer> {
+    unsafe {
+        let subs: *mut AnyObject = msg_send![&**l, sublayers];
+        if subs.is_null() {
+            return None;
+        }
+        let n: usize = msg_send![subs, count];
+        if n == 0 {
+            return None;
+        }
+        let obj: *mut AnyObject = msg_send![subs, objectAtIndex: 0usize];
+        Retained::retain(obj)
+    }
+}
+
 /// Attach a layer as a view's backing layer content.
 pub fn set_view_layer(view: &NSView, l: &Layer) {
     unsafe {

@@ -6,6 +6,7 @@
 //! it. The canvas's own promise — "everything is remappable" — only stays cheap
 //! if key bindings are data over this enum rather than a match arm per widget.
 
+use crate::bookmark::BookmarkId;
 use crate::chrome::TabLayout;
 use crate::tab::TabId;
 
@@ -24,6 +25,12 @@ pub enum Action {
     OpenSwitcher,
     SwitchWorkspace(usize),
     JumpLatestNotification,
+    /// Save or unsave the active tab (⌘D).
+    ToggleBookmark,
+    /// Navigate the active tab to a saved bookmark.
+    OpenBookmark(BookmarkId),
+    /// Forget a bookmark.
+    RemoveBookmark(BookmarkId),
     /// ESC / scrim click: close whatever overlay is on top.
     Dismiss,
 }
@@ -40,7 +47,7 @@ pub struct Command {
 
 /// Build the palette contents. Two rows are stateful — the layout toggle and
 /// the pin toggle name the state they move *to*, not the state they are in.
-pub fn command_list(layout: TabLayout, pinned: bool) -> Vec<Command> {
+pub fn command_list(layout: TabLayout, pinned: bool, bookmarked: bool) -> Vec<Command> {
     vec![
         Command { icon: "+", label: "New tab".into(), hint: "⌘T", action: Action::NewTab },
         Command { icon: "×", label: "Close tab".into(), hint: "⌘W", action: Action::CloseActiveTab },
@@ -56,6 +63,12 @@ pub fn command_list(layout: TabLayout, pinned: bool) -> Vec<Command> {
         Command { icon: "◫", label: "Switch workspace".into(), hint: "⌘Space", action: Action::OpenSwitcher },
         Command { icon: "◈", label: "Jump to latest notification".into(), hint: "⌘⇧J", action: Action::JumpLatestNotification },
         Command { icon: "⌁", label: "Focus address bar".into(), hint: "⌘L", action: Action::FocusAddress },
+        Command {
+            icon: if bookmarked { "★" } else { "☆" },
+            label: if bookmarked { "Remove bookmark".into() } else { "Bookmark this tab".into() },
+            hint: "⌘D",
+            action: Action::ToggleBookmark,
+        },
         Command {
             icon: if pinned { "◉" } else { "○" },
             label: if pinned { "Unpin chrome".into() } else { "Pin chrome open".into() },
@@ -99,6 +112,7 @@ pub const SHORTCUTS: &[Shortcut] = &[
     Shortcut { label: "Workspace 1–3", keys: "⌘1–3" },
     Shortcut { label: "Workspace switcher", keys: "⌘Space" },
     Shortcut { label: "Jump to notification", keys: "⌘⇧J" },
+    Shortcut { label: "Bookmark tab", keys: "⌘D" },
     Shortcut { label: "Toggle tab layout", keys: "⌘E" },
     Shortcut { label: "Settings", keys: "⌘," },
     Shortcut { label: "Shortcuts", keys: "?" },
@@ -143,6 +157,7 @@ pub fn resolve(key: &str, mods: Mods, text_field_focused: bool) -> Option<Action
             "l" => Some(Action::FocusAddress),
             "t" => Some(Action::NewTab),
             "w" => Some(Action::CloseActiveTab),
+            "d" => Some(Action::ToggleBookmark),
             "e" => Some(Action::ToggleLayout),
             "," => Some(Action::OpenSettings),
             _ => None,

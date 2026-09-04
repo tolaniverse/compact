@@ -13,6 +13,7 @@
 //! The shell drives this by calling [`App::apply`] with an [`Action`], then
 //! draining the returned [`Effect`]s.
 
+pub mod bookmark;
 pub mod chrome;
 pub mod command;
 pub mod notify;
@@ -24,6 +25,7 @@ pub mod workspace;
 #[cfg(test)]
 mod tests;
 
+use bookmark::Bookmarks;
 use chrome::{ChromeConfig, ChromeVisibility, Reveal};
 use command::{Action, Command};
 use notify::Notifications;
@@ -74,6 +76,7 @@ pub struct App {
     pub reveal: Reveal,
     pub overlay: Overlay,
     pub notifications: Notifications,
+    pub bookmarks: Bookmarks,
     pub budget: LiveBudget,
     pub pressure: Pressure,
 
@@ -115,6 +118,7 @@ impl App {
             reveal: Reveal::default(),
             overlay: Overlay::None,
             notifications: Notifications::new(),
+            bookmarks: Bookmarks::seeded(),
             budget: LiveBudget::default(),
             pressure: Pressure::Normal,
             query: String::new(),
@@ -142,9 +146,26 @@ impl App {
 
     pub fn commands(&self) -> Vec<Command> {
         command::filter(
-            command::command_list(self.chrome.layout, self.chrome.pinned),
+            command::command_list(self.chrome.layout, self.chrome.pinned, self.is_bookmarked()),
             &self.query,
         )
+    }
+
+    /// Whether the active tab's host is saved.
+    pub fn is_bookmarked(&self) -> bool {
+        self.bookmarks
+            .contains_host(&self.workspaces.current().active_tab().host)
+    }
+
+    /// `★` when the active tab is saved, `☆` otherwise.
+    pub fn star_glyph(&self) -> &'static str {
+        if self.is_bookmarked() { "★" } else { "☆" }
+    }
+
+    /// Load progress of the active tab, if a navigation is in flight.
+    pub fn load_progress(&self) -> Option<f64> {
+        let t = self.workspaces.current().active_tab();
+        t.loading.then_some(t.progress)
     }
 
     pub fn memory(&self) -> MemoryReport {
@@ -163,7 +184,12 @@ impl App {
     }
 
     pub fn hint_showing(&self) -> bool {
-        self.chrome.show_hint && self.hint_visible && self.overlay == Overlay::None
+        self.chrome.show_hint
+            && self.hint_visible
+            && self.overlay == Overlay::None
+            // A toast occupies the same corner of the user's attention and is
+            // actually about something; the hint yields to it.
+            && self.notifications.is_empty()
     }
 
     // ---- input --------------------------------------------------------------
@@ -216,7 +242,14 @@ impl App {
                 self.hint_visible = false;
                 fx.push(Effect::FocusAddressField);
             }
-            Action::ToggleLayout => self.chrome.layout = self.chrome.layout.toggled(),
+            Action::ToggleLayout => {
+                self.chrome.layout = self.chrome.layout.toggled();
+                // Show the result. Silently swapping hidden chrome gives no
+                // feedback that anything happened.
+                self.reveal.top = true;
+                self.reveal.side = true;
+                self.hint_visible = false;
+            }
             Action::TogglePin => self.chrome.pinned = !self.chrome.pinned,
             Action::NewTab => {
                 let id = self.workspaces.new_tab();
@@ -233,6 +266,23 @@ impl App {
             Action::SelectTab(id) => fx.extend(self.select_tab(id)),
             Action::SwitchWorkspace(i) => fx.extend(self.switch_workspace(i, None)),
             Action::JumpLatestNotification => fx.extend(self.jump_latest()),
+            Action::ToggleBookmark => {
+                let tint = self.workspaces.current().dot;
+                let tab = self.workspaces.current().active_tab().clone();
+                self.bookmarks.toggle(&tab, tint);
+            }
+            Action::OpenBookmark(id) => {
+                if let Some(b) = self.bookmarks.get(id) {
+                    let (host, title) = (b.host.clone(), b.title.clone());
+                    let url = format!("https://{host}");
+                    let active = self.workspaces.current().active;
+                    self.workspaces.set_location(active, &title, &host, &url);
+                    self.address_draft = None;
+                    self.overlay = Overlay::None;
+                    fx.push(Effect::Load(active, url));
+                }
+            }
+            Action::RemoveBookmark(id) => self.bookmarks.remove(id),
         }
         fx
     }
@@ -416,6 +466,19 @@ impl App {
     }
 
     // ---- memory -------------------------------------------------------------
+
+    /// Record navigation progress reported by the engine.
+    pub fn record_progress(&mut self, id: TabId, loading: bool, progress: f64) -> bool {
+        for w in &mut self.workspaces.spaces {
+            if let Some(t) = w.tab_mut(id) {
+                let changed = t.loading != loading || (t.progress - progress).abs() > 0.01;
+                t.loading = loading;
+                t.progress = progress;
+                return changed;
+            }
+        }
+        false
+    }
 
     /// Record a measured footprint for a tab.
     pub fn record_footprint(&mut self, id: TabId, bytes: u64) {

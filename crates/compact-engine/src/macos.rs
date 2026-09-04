@@ -180,6 +180,15 @@ impl WebKitEngine {
         self.views.get(&id).map(|v| &**v)
     }
 
+    /// Whether a navigation is in flight, and how far along it is.
+    ///
+    /// `estimatedProgress` is WebKit's own figure, so the load bar reflects the
+    /// actual navigation rather than a timer pretending to.
+    pub fn load_state(&self, id: TabId) -> Option<(bool, f64)> {
+        let v = self.views.get(&id)?;
+        unsafe { Some((v.isLoading(), v.estimatedProgress())) }
+    }
+
     /// Current page title, if the tab is live and has one.
     pub fn title(&self, id: TabId) -> Option<String> {
         let v = self.views.get(&id)?;

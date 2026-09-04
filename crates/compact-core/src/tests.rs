@@ -644,6 +644,139 @@ fn elsewhere_lists_only_other_workspaces_with_unread() {
     assert_eq!(e[0].0, 2, "the current workspace is never 'elsewhere'");
 }
 
+// ---- bookmarks -----------------------------------------------------------
+
+#[test]
+fn the_star_reflects_the_active_tab() {
+    let mut app = App::new();
+    assert!(!app.is_bookmarked(), "the seeded active tab is not saved");
+    assert_eq!(app.star_glyph(), "☆");
+    app.apply(Action::ToggleBookmark);
+    assert!(app.is_bookmarked());
+    assert_eq!(app.star_glyph(), "★");
+    app.apply(Action::ToggleBookmark);
+    assert!(!app.is_bookmarked(), "⌘D toggles both ways");
+}
+
+#[test]
+fn bookmarks_are_keyed_by_host_not_tab() {
+    // Bookmarking is a statement about a place; the tab showing it may be
+    // closed, or the same site may be open twice.
+    let mut app = App::new();
+    app.apply(Action::ToggleBookmark);
+    let host = app.workspaces.current().active_tab().host.clone();
+    let other = app.apply(Action::NewTab);
+    assert!(!other.is_empty());
+    app.set_address_draft(&host);
+    app.commit_address();
+    assert!(app.is_bookmarked(), "a different tab on the same host reads as saved");
+}
+
+#[test]
+fn a_new_bookmark_takes_its_workspace_tint() {
+    let mut app = App::new();
+    app.apply(Action::SwitchWorkspace(1));
+    // Not the workspace's first tab — that host ships as a seeded bookmark, so
+    // toggling it would remove rather than add.
+    let unsaved = app.workspaces.current().tabs[1].id;
+    app.apply(Action::SelectTab(unsaved));
+    assert!(!app.is_bookmarked());
+    app.apply(Action::ToggleBookmark);
+    let saved = app.bookmarks.items().last().unwrap();
+    assert_eq!(saved.tint, crate::theme::WORKSPACE_DOTS[1], "tinted by where it was saved");
+}
+
+#[test]
+fn opening_a_bookmark_navigates_the_active_tab() {
+    let mut app = App::new();
+    let b = app.bookmarks.items()[1].id;
+    let host = app.bookmarks.get(b).unwrap().host.clone();
+    let fx = app.apply(Action::OpenBookmark(b));
+    assert_eq!(app.workspaces.current().active_tab().host, host);
+    let Some(Effect::Load(_, url)) = fx.first() else { panic!("expected a load") };
+    assert_eq!(url, &format!("https://{host}"));
+}
+
+#[test]
+fn removing_a_bookmark_forgets_it() {
+    let mut app = App::new();
+    let before = app.bookmarks.items().len();
+    let b = app.bookmarks.items()[0].id;
+    app.apply(Action::RemoveBookmark(b));
+    assert_eq!(app.bookmarks.items().len(), before - 1);
+    assert!(app.bookmarks.get(b).is_none());
+}
+
+#[test]
+fn cmd_d_is_bound_and_the_palette_tracks_it() {
+    assert_eq!(
+        resolve("d", Mods { cmd: true, ..Default::default() }, false),
+        Some(Action::ToggleBookmark)
+    );
+    let mut app = App::new();
+    assert!(app.commands().iter().any(|c| c.label == "Bookmark this tab"));
+    app.apply(Action::ToggleBookmark);
+    assert!(app.commands().iter().any(|c| c.label == "Remove bookmark"));
+}
+
+#[test]
+fn a_bookmark_initial_is_its_first_letter() {
+    let app = App::new();
+    assert_eq!(app.bookmarks.items()[1].initial(), "S");
+}
+
+// ---- load progress -------------------------------------------------------
+
+#[test]
+fn progress_is_reported_only_while_loading() {
+    let mut app = App::new();
+    let id = app.workspaces.current().active;
+    assert_eq!(app.load_progress(), None, "an idle tab shows no bar");
+    app.record_progress(id, true, 0.4);
+    assert_eq!(app.load_progress(), Some(0.4));
+    app.record_progress(id, false, 1.0);
+    assert_eq!(app.load_progress(), None, "the bar goes when the load finishes");
+}
+
+#[test]
+fn progress_updates_are_debounced() {
+    // The ticker polls constantly; only meaningful movement should redraw.
+    let mut app = App::new();
+    let id = app.workspaces.current().active;
+    assert!(app.record_progress(id, true, 0.40));
+    assert!(!app.record_progress(id, true, 0.401), "sub-1% is noise");
+    assert!(app.record_progress(id, true, 0.60));
+}
+
+#[test]
+fn only_the_visible_tab_drives_the_bar() {
+    let mut app = App::new();
+    let ids: Vec<TabId> = app.workspaces.current().tabs.iter().map(|t| t.id).collect();
+    app.record_progress(ids[0], true, 0.5);
+    app.apply(Action::SelectTab(ids[2]));
+    assert_eq!(app.load_progress(), None, "a background load is not this tab's bar");
+}
+
+// ---- chrome feedback -----------------------------------------------------
+
+#[test]
+fn toggling_layout_reveals_what_it_rearranged() {
+    // Silently swapping hidden chrome gives no sign anything happened.
+    let mut app = App::new();
+    assert!(!app.visibility().any());
+    app.apply(Action::ToggleLayout);
+    assert!(app.visibility().any());
+}
+
+#[test]
+fn the_hint_yields_to_a_toast() {
+    let mut app = App::new();
+    assert!(app.hint_showing());
+    let tab = app.workspaces.spaces[1].tabs[0].id;
+    app.notifications.push(1, "x", "board.internal", tab, 0);
+    assert!(!app.hint_showing(), "both live in the same corner of attention");
+}
+
 #[test]
 fn memory_report_labels_live_bytes_only() {
     let mut app = App::new();

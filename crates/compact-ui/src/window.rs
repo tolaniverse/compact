@@ -536,6 +536,9 @@ fn install_monitors(inner: &Rc<RefCell<Inner>>) {
             Some(Hit::SelectTab(id)) => i.dispatch(Action::SelectTab(id)),
             Some(Hit::CloseTab(id)) => i.dispatch(Action::CloseTab(id)),
             Some(Hit::NewTab) => i.dispatch(Action::NewTab),
+            Some(Hit::Bookmark(b)) => i.dispatch(Action::OpenBookmark(b)),
+            Some(Hit::RemoveBookmark(b)) => i.dispatch(Action::RemoveBookmark(b)),
+            Some(Hit::ToggleBookmark) => i.dispatch(Action::ToggleBookmark),
             Some(Hit::ToggleLayout) => i.dispatch(Action::ToggleLayout),
             Some(Hit::Settings) => i.dispatch(Action::OpenSettings),
             Some(Hit::Palette) => i.dispatch(Action::OpenPalette),
@@ -627,6 +630,14 @@ fn install_ticker(inner: &Rc<RefCell<Inner>>) {
         if i.app.measured_footprint != Some(measured) {
             i.app.measured_footprint = Some(measured);
             dirty = true;
+        }
+
+        // Real navigation progress for the visible tab, straight from WebKit.
+        let active = i.app.workspaces.current().active;
+        if let Some((loading, progress)) = i.engine.load_state(active) {
+            if i.app.record_progress(active, loading, progress) {
+                dirty = true;
+            }
         }
 
         if let Some(cell) = &i.pressure {
