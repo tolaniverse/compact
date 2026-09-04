@@ -159,6 +159,15 @@ pub mod metric {
 /// laggy rather than snapping into place.
 pub const EASE_OUT_EXPO: [f32; 4] = [0.16, 1.0, 0.3, 1.0];
 
+/// The canvas's *page* easing, `cubic-bezier(.2, .9, .25, 1)`.
+///
+/// Deliberately gentler than [`EASE_OUT_EXPO`], and the canvas uses it only for
+/// the workspace slide. The distinction matters more than it looks: under the
+/// chrome curve a 222 px slide is 84% finished in 120 ms and then crawls, which
+/// reads as a jump rather than a movement. Chrome should snap into place; a
+/// page should be seen travelling.
+pub const EASE_SLIDE: [f32; 4] = [0.2, 0.9, 0.25, 1.0];
+
 /// Animation durations, in seconds, matching the canvas transitions.
 pub mod duration {
     /// Sidebar / strip tear-in.

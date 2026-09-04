@@ -181,10 +181,15 @@ pub fn without_animation<R>(f: impl FnOnce() -> R) -> R {
     }
 }
 
-/// The canvas's easing curve as a `CAMediaTimingFunction`.
-pub fn ease() -> Retained<CAMediaTimingFunction> {
-    let [a, b, c, d] = compact_core::theme::EASE_OUT_EXPO;
+/// A design easing curve as a `CAMediaTimingFunction`.
+pub fn timing(curve: [f32; 4]) -> Retained<CAMediaTimingFunction> {
+    let [a, b, c, d] = curve;
     CAMediaTimingFunction::functionWithControlPoints(a, b, c, d)
+}
+
+/// The chrome easing curve.
+pub fn ease() -> Retained<CAMediaTimingFunction> {
+    timing(compact_core::theme::EASE_OUT_EXPO)
 }
 
 /// Animate AppKit view properties over `duration` with the design's easing.
@@ -194,10 +199,15 @@ pub fn ease() -> Retained<CAMediaTimingFunction> {
 /// in particular manages its own backing layer, so driving its layer directly
 /// fights AppKit's layout instead of animating it.
 pub fn animate<R>(duration: f64, f: impl FnOnce() -> R) -> R {
+    animate_with(compact_core::theme::EASE_OUT_EXPO, duration, f)
+}
+
+/// As [`animate`], on a specific easing curve.
+pub fn animate_with<R>(curve: [f32; 4], duration: f64, f: impl FnOnce() -> R) -> R {
     NSAnimationContext::beginGrouping();
     let ctx = NSAnimationContext::currentContext();
     ctx.setDuration(duration);
-    ctx.setTimingFunction(Some(&ease()));
+    ctx.setTimingFunction(Some(&timing(curve)));
     let r = f();
     NSAnimationContext::endGrouping();
     r
@@ -240,25 +250,6 @@ pub fn breathe(l: &Layer, from: f64, to: f64, period: f64) {
 /// Horizontally offset a view's backing layer, in points.
 ///
 /// Translation only. Rotation and scale would need the layer's `anchorPoint` at
-/// its centre, and AppKit owns that on a layer-backed `NSView` — fighting it is
-/// how you get a page that pivots about its corner.
-pub fn set_translate_x(host: *mut AnyObject, tx: f64) {
-    unsafe {
-        let t = [1.0f64, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, tx, 0.0, 0.0, 1.0];
-        let cls = objc2::runtime::AnyClass::get(c"NSValue").expect("NSValue");
-        let v: *mut AnyObject = msg_send![cls,
-            valueWithBytes: &t as *const _ as *const c_void,
-            objCType: c"{CATransform3D=dddddddddddddddd}".as_ptr()];
-        let _: () = msg_send![host, setValue: v, forKeyPath: &*NSString::from_str("transform")];
-    }
-}
-
-/// Set a view backing layer's opacity.
-pub fn set_host_opacity(host: *mut AnyObject, v: f64) {
-    unsafe {
-        let _: () = msg_send![host, setOpacity: v as f32];
-    }
-}
 
 /// Set a layer's vertical scale about its centre, for the address bar's squash.
 pub fn set_scale_y(l: &Layer, sy: f64) {

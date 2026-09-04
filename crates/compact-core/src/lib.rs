@@ -421,8 +421,49 @@ impl App {
         // Only prewarm once the live set is already within budget; otherwise a
         // single pass could evict and restore in the same breath.
         if plan.is_empty() {
+            // Other workspaces' active tabs come first. A workspace switch is a
+            // single keystroke onto a whole different page, so arriving at an
+            // unpainted one is the most visible stall in the product — more so
+            // than the next tab along, which is one click away and cheap to
+            // recover from.
+            let mut wanted: Vec<TabId> = self
+                .workspaces
+                .spaces
+                .iter()
+                .enumerate()
+                .filter(|(i, _)| *i != self.workspaces.current)
+                .map(|(_, w)| w.active)
+                .filter(|id| {
+                    self.workspaces
+                        .locate(*id)
+                        .is_some_and(|(_, t)| t.state.needs_restore())
+                })
+                .collect();
+
             let tabs = self.workspaces.current().tabs.clone();
-            for id in policy::prewarm_candidates(&tabs, active, &self.budget, self.pressure, 1) {
+            wanted.extend(policy::prewarm_candidates(
+                &tabs,
+                active,
+                &self.budget,
+                self.pressure,
+                1,
+            ));
+
+            // Respect the same headroom rule the in-workspace prewarm uses:
+            // never spend more than the budget has spare.
+            let all = self.workspaces.all_tabs();
+            let live_bytes: u64 = all
+                .iter()
+                .filter(|t| t.state.is_live())
+                .map(tab::TabMeta::effective_footprint)
+                .sum();
+            let live_count = all.iter().filter(|t| t.state.is_live()).count();
+            let ceiling = self.budget.effective_bytes(self.pressure);
+            let room = (((ceiling.saturating_sub(live_bytes)) / tab::ESTIMATED_LIVE_BYTES) as usize)
+                .min(self.budget.max_live.saturating_sub(live_count));
+            wanted.truncate(room);
+
+            for id in wanted {
                 if let Some((_, t)) = self.workspaces.locate(id) {
                     let eff = match t.state {
                         TabState::Hibernated => Effect::Restore(id),

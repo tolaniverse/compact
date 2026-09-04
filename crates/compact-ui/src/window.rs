@@ -12,8 +12,9 @@ use std::time::Instant;
 
 use block2::RcBlock;
 use objc2::rc::Retained;
-use objc2::{msg_send, MainThreadMarker, MainThreadOnly};
+use objc2::{msg_send, MainThreadMarker, MainThreadOnly, Message};
 use objc2_app_kit::{
+    NSAnimatablePropertyContainer,
     NSApplication, NSApplicationActivationPolicy, NSBackingStoreType, NSColor, NSEvent,
     NSEventMask, NSEventModifierFlags, NSEventType, NSView, NSWindow, NSWindowStyleMask,
     NSWindowTitleVisibility,
@@ -31,7 +32,7 @@ use compact_mem::{Guard, PressureMonitor};
 
 use crate::chrome::{Chrome, Hit};
 use crate::overlays::{Overlays, SettingsHit};
-use crate::widgets::{animated, rect, without_animation};
+use crate::widgets::{animate_with, rect, without_animation};
 
 struct Inner {
     app: App,
@@ -48,6 +49,9 @@ struct Inner {
     /// Weak self-handle, so deferred work can reach back without keeping the
     /// shell alive past the window.
     self_ref: std::rc::Weak<RefCell<Inner>>,
+    /// True while a workspace transition is travelling, so `render` leaves the
+    /// pages where the animation put them.
+    sliding: bool,
 }
 
 impl Inner {
@@ -63,7 +67,8 @@ impl Inner {
 
     /// Carry out the engine work the core asked for.
     fn perform(&mut self, effects: Vec<Effect>) {
-        let mut slide: Option<i8> = None;
+        // Direction, plus whether the destination was already painted.
+        let mut slide: Option<(i8, bool)> = None;
         for e in effects {
             match e {
                 Effect::Load(id, url) => {
@@ -90,13 +95,24 @@ impl Inner {
                     f.setStringValue(&NSString::from_str(""));
                     self.window.makeFirstResponder(Some(&f));
                 }
-                Effect::SlideWorkspace(dir) => slide = Some(dir),
+                Effect::SlideWorkspace(dir) => {
+                    // Sampled here, before the tab's own Load/Restore effects
+                    // run, so it reflects whether the destination already had a
+                    // rendered page rather than one we are about to request.
+                    let target = self.app.workspaces.current().active;
+                    slide = Some((dir, self.engine.is_live(target)));
+                }
             }
         }
         // Whatever just happened, the visible tab may have changed.
         let active = self.app.workspaces.current().active;
         match slide {
-            Some(dir) if self.app.chrome.smooth_motion => self.slide_workspace(active, dir),
+            // Sliding a blank page in is worse than not sliding: the outgoing
+            // page leaves, nothing visibly arrives, and the transition reads as
+            // a glitch. Prewarming means this is the uncommon case.
+            Some((dir, true)) if self.app.chrome.smooth_motion => {
+                self.slide_workspace(active, dir)
+            }
             _ => self.engine.show(active),
         }
     }
@@ -104,12 +120,17 @@ impl Inner {
     /// The workspace transition: the outgoing page leaves in the direction of
     /// travel and the incoming one arrives from the opposite side.
     ///
-    /// Both pages are real, mounted web views — no snapshot is taken. Snapshots
-    /// would only help the incoming side, and the incoming side is exactly where
-    /// they are unavailable: a hibernated tab has nothing rendered to capture,
-    /// and keeping one per tab would mean caching a full-window image per tab,
-    /// which costs orders of magnitude more than the 687 B session it is
-    /// supposed to be accompanying.
+    /// Animates view `frame` and `alphaValue` through `NSAnimationContext`,
+    /// not layer `transform`. A layer-backed `NSView` answers `actionForKey:`
+    /// with `NSNull`, so implicit `CALayer` animations on its backing layer are
+    /// suppressed and every value simply jumps — which is what an earlier
+    /// version of this did.
+    ///
+    /// Both pages are real, mounted web views; no snapshot is taken. Snapshots
+    /// would only help the incoming side, and that is exactly where they are
+    /// unavailable: a hibernated tab has nothing rendered to capture, and
+    /// keeping one per tab would mean a full-window image against a 687 B
+    /// session.
     fn slide_workspace(&mut self, active: TabId, dir: i8) {
         use compact_core::theme::duration as dur;
         let outgoing = self.engine.visible();
@@ -117,51 +138,56 @@ impl Inner {
             self.engine.show(active);
             return;
         }
-        let (w, _) = self.size();
+        let (w, h) = self.size();
         let travel = w * 0.15;
         let d = dir as f64;
+        let full = rect(0.0, 0.0, w, h);
 
-        // Mount the incoming page beside the outgoing one, pre-offset to the
-        // side it should arrive from.
+        // Mount the incoming page beside the outgoing one, parked on the side
+        // it should arrive from.
         self.engine.mount_alongside(active);
-        let Some(incoming) = self.engine.view(active).map(host_layer_of) else {
+        let Some(incoming) = self.engine.view(active).map(|v| v.retain()) else {
             self.engine.show(active);
             return;
         };
         without_animation(|| {
-            crate::widgets::set_translate_x(incoming, d * travel);
-            crate::widgets::set_host_opacity(incoming, 0.0);
+            incoming.setFrame(rect(d * travel, 0.0, w, h));
+            incoming.setAlphaValue(0.0);
         });
 
-        // Push the outgoing page out under it.
-        if let Some(prev) = outgoing.and_then(|id| self.engine.view(id)).map(host_layer_of) {
-            animated(dur::SLIDE_OUT, || {
-                crate::widgets::set_translate_x(prev, -d * travel);
-                crate::widgets::set_host_opacity(prev, 0.0);
+        // Hold off `render`'s frame reset until the travel is over, or it will
+        // snap the incoming page to centre on the very next tick.
+        self.sliding = true;
+
+        if let Some(prev) = outgoing.and_then(|id| self.engine.view(id)).map(|v| v.retain()) {
+            animate_with(compact_core::theme::EASE_SLIDE, dur::SLIDE_OUT, || {
+                prev.animator().setFrame(rect(-d * travel, 0.0, w, h));
+                prev.animator().setAlphaValue(0.0);
             });
         }
-        animated(dur::SLIDE_IN, || {
-            crate::widgets::set_translate_x(incoming, 0.0);
-            crate::widgets::set_host_opacity(incoming, 1.0);
+        animate_with(compact_core::theme::EASE_SLIDE, dur::SLIDE_IN, || {
+            incoming.animator().setFrame(full);
+            incoming.animator().setAlphaValue(1.0);
         });
 
-        // Detach the outgoing page once it is off screen, and reset the
-        // transform so it is centred again the next time it is shown.
-        if let Some(prev) = outgoing {
-            let me = self.self_ref.clone();
-            queue_after(dur::SLIDE_IN, move || {
-                if let Some(inner) = me.upgrade() {
-                    let i = inner.borrow_mut();
-                    if let Some(l) = i.engine.view(prev).map(host_layer_of) {
-                        without_animation(|| {
-                            crate::widgets::set_translate_x(l, 0.0);
-                            crate::widgets::set_host_opacity(l, 1.0);
-                        });
-                    }
-                    i.engine.unmount(prev);
+        // Detach the outgoing page once it is off screen and restore its
+        // geometry, so it is centred and opaque the next time it is shown.
+        let me = self.self_ref.clone();
+        queue_after(dur::SLIDE_IN, move || {
+            let Some(inner) = me.upgrade() else { return };
+            let mut i = inner.borrow_mut();
+            if let Some(prev) = outgoing {
+                if let Some(v) = i.engine.view(prev).map(|v| v.retain()) {
+                    without_animation(|| {
+                        v.setFrame(full);
+                        v.setAlphaValue(1.0);
+                    });
                 }
-            });
-        }
+                i.engine.unmount(prev);
+            }
+            i.sliding = false;
+            i.render();
+        });
     }
 
     /// Push state into the layer tree.
@@ -173,9 +199,12 @@ impl Inner {
         self.chrome.sync(&self.app, now);
         self.overlays.sync(&self.app);
         // Chrome floats above a full-bleed page, so the web view always fills
-        // the window regardless of what is revealed.
-        if let Some(v) = self.engine.view(self.app.workspaces.current().active) {
-            v.setFrame(rect(0.0, 0.0, size.0, size.1));
+        // the window regardless of what is revealed. Skipped mid-transition, or
+        // it would snap the travelling pages back to centre.
+        if !self.sliding {
+            if let Some(v) = self.engine.view(self.app.workspaces.current().active) {
+                v.setFrame(rect(0.0, 0.0, size.0, size.1));
+            }
         }
     }
 
@@ -270,6 +299,7 @@ impl Shell {
             // XPC services with ppid 1 and cannot be attributed by parentage.
             census: compact_mem::WebKitCensus::baseline(),
             self_ref: std::rc::Weak::new(),
+            sliding: false,
         }));
         inner.borrow_mut().self_ref = Rc::downgrade(&inner);
 
@@ -295,6 +325,7 @@ impl Shell {
 
         install_monitors(&inner);
         install_ticker(&inner);
+
 
         window.makeKeyAndOrderFront(None);
         ns_app.activate();
@@ -646,9 +677,4 @@ fn install_menu(mtm: MainThreadMarker, app: &NSApplication) {
     app_item.setSubmenu(Some(&app_menu));
 
     app.setMainMenu(Some(&menubar));
-}
-
-/// A view's backing layer as the untyped pointer AppKit hands back.
-pub fn host_layer_of<T: objc2::Message>(view: &T) -> *mut objc2::runtime::AnyObject {
-    unsafe { objc2::msg_send![view, layer] }
 }
