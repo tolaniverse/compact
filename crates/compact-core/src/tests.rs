@@ -292,34 +292,41 @@ fn threshold_is_clamped_to_the_slider_range() {
 
 // ---- keymap --------------------------------------------------------------
 
+/// The default keymap, which is what these bindings are documented against.
+fn km() -> crate::settings::Keymap {
+    crate::settings::Keymap::default()
+}
+
 #[test]
 fn resolves_the_documented_bindings() {
     let cmd = Mods { cmd: true, ..Default::default() };
-    assert_eq!(resolve("k", cmd, false), Some(Action::OpenPalette));
-    assert_eq!(resolve("K", cmd, false), Some(Action::OpenPalette), "case-insensitive");
-    assert_eq!(resolve("t", cmd, false), Some(Action::NewTab));
-    assert_eq!(resolve(",", cmd, false), Some(Action::OpenSettings));
-    assert_eq!(resolve(" ", cmd, false), Some(Action::OpenSwitcher));
-    assert_eq!(resolve("2", cmd, false), Some(Action::SwitchWorkspace(1)));
-    assert_eq!(resolve("Escape", Mods::default(), false), Some(Action::Dismiss));
+    assert_eq!(resolve(&km(), "k", cmd, false), Some(Action::OpenPalette));
+    assert_eq!(resolve(&km(), "K", cmd, false), Some(Action::OpenPalette), "case-insensitive");
+    assert_eq!(resolve(&km(), "t", cmd, false), Some(Action::NewTab));
+    assert_eq!(resolve(&km(), ",", cmd, false), Some(Action::OpenSettings));
+    assert_eq!(resolve(&km(), " ", cmd, false), Some(Action::OpenSwitcher));
+    assert_eq!(resolve(&km(), "2", cmd, false), Some(Action::SwitchWorkspace(1)));
+    assert_eq!(resolve(&km(), "Escape", Mods::default(), false), Some(Action::Dismiss));
 }
 
 #[test]
 fn shift_j_jumps_rather_than_falling_through() {
     let m = Mods { cmd: true, shift: true, ..Default::default() };
-    assert_eq!(resolve("j", m, false), Some(Action::JumpLatestNotification));
+    assert_eq!(resolve(&km(), "j", m, false), Some(Action::JumpLatestNotification));
 }
 
 #[test]
 fn question_mark_is_suppressed_while_typing() {
-    assert_eq!(resolve("?", Mods::default(), false), Some(Action::OpenShortcuts));
-    assert_eq!(resolve("?", Mods::default(), true), None, "typing ? into the address bar");
+    // `?` arrives as shift-slash, which is how the binding is stored.
+    let q = Mods { shift: true, ..Default::default() };
+    assert_eq!(resolve(&km(), "?", q, false), Some(Action::OpenShortcuts));
+    assert_eq!(resolve(&km(), "?", q, true), None, "typing ? into the address bar");
 }
 
 #[test]
 fn unbound_keys_resolve_to_nothing() {
-    assert_eq!(resolve("q", Mods { cmd: true, ..Default::default() }, false), None);
-    assert_eq!(resolve("a", Mods::default(), false), None);
+    assert_eq!(resolve(&km(), "q", Mods { cmd: true, ..Default::default() }, false), None);
+    assert_eq!(resolve(&km(), "a", Mods::default(), false), None);
 }
 
 // ---- app behaviour -------------------------------------------------------
@@ -522,7 +529,7 @@ fn address_field_mirrors_the_active_tab_until_edited() {
     app.set_address_draft("part");
     assert_eq!(app.address_text(), "part");
     app.apply(Action::NewTab);
-    assert_eq!(app.address_text(), "compact.app/new", "a new tab reclaims the field");
+    assert_eq!(app.address_text(), crate::page::NEW_TAB_URL, "a new tab reclaims the field");
 }
 
 #[test]
@@ -848,7 +855,7 @@ fn removing_a_bookmark_forgets_it() {
 #[test]
 fn cmd_d_is_bound_and_the_palette_tracks_it() {
     assert_eq!(
-        resolve("d", Mods { cmd: true, ..Default::default() }, false),
+        resolve(&km(), "d", Mods { cmd: true, ..Default::default() }, false),
         Some(Action::ToggleBookmark)
     );
     let mut app = App::new();
@@ -993,4 +1000,382 @@ fn memory_report_labels_live_bytes_only() {
 
     app.measured_footprint = Some(371 * MB);
     assert_eq!(app.memory_label(), "371 MB", "a measurement wins over the estimate");
+}
+
+// ---- internal pages ------------------------------------------------------
+
+use crate::bridge::{parse, Incoming, PageMessage};
+use crate::page::{ErrorKind, PageKind, NEW_TAB_URL};
+use crate::settings::{BindingId, Chord, Keymap, NotifMode, Startup};
+
+fn active(app: &App) -> &TabMeta {
+    app.workspaces.current().active_tab()
+}
+
+#[test]
+fn a_new_tab_is_drawn_not_fetched() {
+    let mut app = App::new();
+    let fx = app.apply(Action::NewTab);
+    assert_eq!(active(&app).kind, PageKind::NewTab);
+    assert_eq!(active(&app).host, NEW_TAB_URL);
+    let id = active(&app).id;
+    assert!(
+        fx.iter().any(|e| matches!(e, Effect::RenderInternal(t, _) if *t == id)),
+        "⌘T renders our own page: {fx:?}"
+    );
+    assert!(
+        !fx.iter().any(|e| matches!(e, Effect::Load(t, _) if *t == id)),
+        "and never asks the network for it"
+    );
+}
+
+#[test]
+fn the_settings_page_opens_as_a_tab() {
+    let mut app = App::new();
+    let before = app.workspaces.current().tabs.len();
+    app.apply(Action::OpenSettingsPage);
+    assert_eq!(app.workspaces.current().tabs.len(), before + 1);
+    assert_eq!(active(&app).kind, PageKind::Settings);
+    // The drawer and the page are different surfaces; opening one must not
+    // leave the other on top of it.
+    assert_eq!(app.overlay, Overlay::None);
+}
+
+#[test]
+fn navigating_away_from_an_internal_page_makes_it_a_web_tab() {
+    let mut app = App::new();
+    app.apply(Action::NewTab);
+    app.navigate("example.com");
+    assert_eq!(active(&app).kind, PageKind::Web);
+    assert_eq!(active(&app).error, None);
+}
+
+#[test]
+fn a_failed_navigation_becomes_an_explained_error() {
+    let mut app = App::new();
+    let id = active(&app).id;
+    app.navigate("nowhere.invalid");
+    let fx = app.fail_navigation(id, -1003);
+    assert_eq!(active(&app).kind, PageKind::Error);
+    assert_eq!(active(&app).error, Some(ErrorKind::Dns));
+    assert!(fx.iter().any(|e| matches!(e, Effect::RenderInternal(..))));
+    // The failed host is kept: it is what the page reads out and what ⌘R
+    // retries.
+    assert_eq!(active(&app).host, "nowhere.invalid");
+}
+
+#[test]
+fn a_cancelled_navigation_is_not_an_error() {
+    let mut app = App::new();
+    let id = active(&app).id;
+    // -999 is NSURLErrorCancelled, which is what a redirect reports. Drawing an
+    // error page for it would flash one on every ordinary redirect.
+    assert!(app.fail_navigation(id, -999).is_empty());
+    assert_eq!(active(&app).kind, PageKind::Web);
+}
+
+#[test]
+fn retry_reloads_the_url_the_error_page_failed_at() {
+    let mut app = App::new();
+    let id = active(&app).id;
+    app.navigate("example.org");
+    app.fail_navigation(id, -1001);
+    assert_eq!(active(&app).error, Some(ErrorKind::Timeout));
+
+    let fx = app.apply(Action::Retry);
+    assert_eq!(active(&app).kind, PageKind::Web, "no longer an error page");
+    assert_eq!(active(&app).error, None);
+    assert!(
+        fx.iter()
+            .any(|e| matches!(e, Effect::Load(t, u) if *t == id && u == "https://example.org")),
+        "{fx:?}"
+    );
+}
+
+#[test]
+fn retry_on_a_web_page_reloads_rather_than_reloading_the_address() {
+    let mut app = App::new();
+    let id = active(&app).id;
+    let fx = app.apply(Action::Retry);
+    assert_eq!(fx, vec![Effect::Reload(id)]);
+}
+
+#[test]
+fn an_internal_tab_is_redrawn_rather_than_restored() {
+    let mut app = App::new();
+    app.apply(Action::NewTab);
+    let id = active(&app).id;
+    app.workspaces.set_state(id, TabState::Hibernated);
+    let fx = app.apply(Action::SelectTab(id));
+    assert!(
+        fx.iter().any(|e| matches!(e, Effect::RenderInternal(t, _) if *t == id)),
+        "a session blob describes navigation history, not a page we generated"
+    );
+    assert!(!fx.iter().any(|e| matches!(e, Effect::Restore(t) if *t == id)));
+}
+
+#[test]
+fn history_is_by_place_and_bounded() {
+    let mut app = App::new();
+    for host in ["a.com", "b.com", "a.com/deep", "c.com", "d.com", "e.com", "f.com", "g.com"] {
+        app.navigate(host);
+    }
+    assert_eq!(app.history.len(), crate::HISTORY_LIMIT);
+    let hosts: Vec<&str> = app.history.iter().map(|v| v.host.as_str()).collect();
+    assert_eq!(hosts[0], "g.com", "most recent first");
+    assert_eq!(
+        hosts.iter().filter(|h| **h == "a.com").count(),
+        1,
+        "a.com/deep refreshed the existing a.com row rather than adding one"
+    );
+    assert!(!hosts.contains(&"b.com"), "the oldest fell off the end instead");
+}
+
+// ---- the page bridge -----------------------------------------------------
+
+#[test]
+fn messages_parse_into_the_same_actions_a_key_would_produce() {
+    assert_eq!(
+        parse("palette"),
+        Some(Incoming { scroll: 0, message: PageMessage::Do(Action::OpenPalette) })
+    );
+    assert_eq!(
+        parse("ws|2"),
+        Some(Incoming { scroll: 0, message: PageMessage::SwitchWorkspace(2) })
+    );
+    assert_eq!(
+        parse("error|dns"),
+        Some(Incoming {
+            scroll: 0,
+            message: PageMessage::Do(Action::ShowError(ErrorKind::Dns))
+        })
+    );
+}
+
+#[test]
+fn a_scroll_prefix_is_split_off_before_the_verb() {
+    let m = parse("742\u{1f}block|pinned").expect("parsed");
+    assert_eq!(m.scroll, 742);
+    assert_eq!(m.message, PageMessage::ToggleBlock("pinned".into()));
+}
+
+#[test]
+fn a_url_containing_a_pipe_survives_the_trip() {
+    let m = parse("0\u{1f}nav|example.com/?a=1|2").expect("parsed");
+    assert_eq!(m.message, PageMessage::Navigate("example.com/?a=1|2".into()));
+}
+
+#[test]
+fn unrecognised_messages_are_dropped() {
+    assert_eq!(parse("evaluate|alert(1)"), None);
+    assert_eq!(parse(""), None);
+    assert_eq!(parse("ws|not-a-number"), None);
+    assert_eq!(parse("startup|whenever"), None);
+}
+
+#[test]
+fn a_toggle_keeps_the_page_where_it_was() {
+    let mut app = App::new();
+    app.apply(Action::OpenSettingsPage);
+    app.on_page_message(Incoming {
+        scroll: 640,
+        message: PageMessage::ToggleBlock("recents".into()),
+    });
+    assert!(!app.settings.blocks.recents);
+    assert_eq!(active(&app).scroll, 640);
+    let Some(Effect::RenderInternal(_, html)) = app.refresh_active_page().into_iter().next() else {
+        panic!("the settings page redraws itself");
+    };
+    assert!(html.contains("window.scrollTo(0, 640)"), "and comes back scrolled");
+}
+
+// ---- the keymap ----------------------------------------------------------
+
+#[test]
+fn default_bindings_render_the_way_the_design_writes_them() {
+    let km = Keymap::default();
+    assert_eq!(km.label(BindingId::Palette), "⌘K");
+    assert_eq!(km.label(BindingId::Jump), "⌘⇧J");
+    assert_eq!(km.label(BindingId::QuickSettings), "⌘,");
+    assert_eq!(km.label(BindingId::AllSettings), "⌘⇧,");
+    assert_eq!(km.label(BindingId::Switcher), "⌘Space");
+    // `?` is a key in its own right, not shift-slash spelled out.
+    assert_eq!(km.label(BindingId::Shortcuts), "?");
+    assert_eq!(km.label(BindingId::Workspace), "⌘1–3");
+}
+
+#[test]
+fn shifted_punctuation_separates_the_two_settings_bindings() {
+    let km = Keymap::default();
+    let cmd = Mods { cmd: true, ..Default::default() };
+    let cmd_shift = Mods { cmd: true, shift: true, ..Default::default() };
+    assert_eq!(resolve(&km, ",", cmd, false), Some(Action::OpenSettings));
+    // AppKit reports shift-comma as `<`; it has to fold back to the same key.
+    assert_eq!(resolve(&km, "<", cmd_shift, false), Some(Action::OpenSettingsPage));
+}
+
+#[test]
+fn rebinding_takes_effect_and_releases_the_old_key() {
+    let mut app = App::new();
+    let cmd = Mods { cmd: true, ..Default::default() };
+    app.settings.recording = Some(BindingId::Palette);
+    app.record_chord("p", cmd);
+
+    assert_eq!(app.settings.recording, None, "one chord ends the recording");
+    assert_eq!(app.resolve_key("p", cmd, false), Some(Action::OpenPalette));
+    assert_eq!(app.resolve_key("k", cmd, false), None, "⌘K is free again");
+}
+
+#[test]
+fn rebinding_onto_a_taken_chord_steals_it_visibly() {
+    let mut km = Keymap::default();
+    km.rebind(BindingId::Palette, Chord::new(true, false, false, "t"));
+    assert_eq!(km.label(BindingId::Palette), "⌘T");
+    assert_eq!(km.label(BindingId::NewTab), "", "displaced, and shown as unbound");
+    assert_eq!(km.lookup("t", Mods { cmd: true, ..Default::default() }), Some(BindingId::Palette));
+}
+
+#[test]
+fn the_workspace_range_cannot_be_recorded_over() {
+    let mut km = Keymap::default();
+    km.rebind(BindingId::Workspace, Chord::new(true, false, false, "z"));
+    assert_eq!(km.label(BindingId::Workspace), "⌘1–3");
+    assert_eq!(km.lookup("z", Mods { cmd: true, ..Default::default() }), None);
+}
+
+#[test]
+fn escape_leaves_record_mode_without_binding_it() {
+    let mut app = App::new();
+    app.settings.recording = Some(BindingId::NewTab);
+    app.record_chord("Escape", Mods::default());
+    assert_eq!(app.settings.recording, None);
+    assert_eq!(
+        app.settings.keymap.label(BindingId::NewTab),
+        "⌘T",
+        "the binding is untouched"
+    );
+}
+
+#[test]
+fn bare_modifiers_do_not_end_a_recording() {
+    let mut app = App::new();
+    app.settings.recording = Some(BindingId::NewTab);
+    app.record_chord("", Mods { cmd: true, ..Default::default() });
+    assert_eq!(app.settings.recording, Some(BindingId::NewTab));
+}
+
+#[test]
+fn the_shortcuts_overlay_reads_the_live_keymap() {
+    let mut km = Keymap::default();
+    km.rebind(BindingId::Palette, Chord::new(true, false, false, "p"));
+    let rows = crate::command::shortcuts(&km);
+    let palette = rows.iter().find(|r| r.label == "Command palette").expect("row");
+    assert_eq!(palette.keys, "⌘P");
+}
+
+// ---- notification modes --------------------------------------------------
+
+#[test]
+fn muting_a_workspace_stops_the_toast_but_not_the_count() {
+    let mut app = App::new();
+    let tab = app.workspaces.spaces[1].tabs[1].id;
+    app.settings.set_notif_mode(1, NotifMode::Muted);
+    app.post_activity(1, "Sprint board".into(), "github.com".into(), tab, 0);
+    assert!(activity(&app).is_empty(), "muted workspaces do not interrupt");
+    assert_eq!(app.workspaces.spaces[1].unread, 1, "but the badge stays honest");
+}
+
+#[test]
+fn mentions_mode_only_surfaces_the_workspace_foreground_tab() {
+    let mut app = App::new();
+    app.settings.set_notif_mode(1, NotifMode::Mentions);
+    let foreground = app.workspaces.spaces[1].active;
+    let background = app.workspaces.spaces[1]
+        .tabs
+        .iter()
+        .map(|t| t.id)
+        .find(|id| *id != foreground)
+        .expect("more than one tab");
+
+    app.post_activity(1, "Elsewhere".into(), "web.dev".into(), background, 0);
+    assert!(activity(&app).is_empty());
+
+    app.post_activity(1, "Sprint board".into(), "github.com".into(), foreground, 0);
+    assert_eq!(activity(&app).len(), 1);
+    assert_eq!(app.workspaces.spaces[1].unread, 2, "both counted");
+}
+
+// ---- markup --------------------------------------------------------------
+
+#[test]
+fn error_classification_names_what_actually_happened() {
+    assert_eq!(ErrorKind::from_url_error(-1009), Some(ErrorKind::Offline));
+    assert_eq!(ErrorKind::from_url_error(-1003), Some(ErrorKind::Dns));
+    assert_eq!(ErrorKind::from_url_error(-1001), Some(ErrorKind::Timeout));
+    assert_eq!(ErrorKind::from_url_error(-1202), Some(ErrorKind::Cert));
+    assert_eq!(ErrorKind::from_url_error(-999), None);
+    // An unrecognised failure claims nothing beyond "it did not arrive".
+    assert_eq!(ErrorKind::from_url_error(-1234), Some(ErrorKind::NotFound));
+}
+
+#[test]
+fn every_error_page_renders_its_own_copy() {
+    for kind in ErrorKind::ALL {
+        let html = crate::html::error(kind, "example.com", 0);
+        let spec = kind.spec();
+        assert!(html.contains(&crate::html::escape(spec.title)), "{kind}");
+        assert!(html.contains(spec.code), "{kind}");
+        assert!(html.contains("example.com"), "{kind} names the host that failed");
+        for step in spec.steps {
+            assert!(html.contains(step.label), "{kind} lists what was checked");
+        }
+    }
+}
+
+#[test]
+fn a_hostile_title_cannot_escape_into_the_markup() {
+    let mut app = App::new();
+    app.navigate("example.com");
+    let id = active(&app).id;
+    app.workspaces.set_location(
+        id,
+        "</span><script>fetch('//evil')</script>",
+        "example.com",
+        "https://example.com",
+    );
+    // `example.com` ships bookmarked, so one toggle would remove it.
+    app.apply(Action::ToggleBookmark);
+    app.apply(Action::ToggleBookmark);
+    let html = crate::html::new_tab(&app, 0);
+    assert!(!html.contains("<script>fetch"), "page titles are data, not markup");
+    assert!(html.contains("&lt;/span&gt;&lt;script&gt;"));
+}
+
+#[test]
+fn turning_a_block_off_removes_it_from_the_page() {
+    let mut app = App::new();
+    assert!(crate::html::new_tab(&app, 0).contains(">Pinned<"));
+    app.settings.blocks.pinned = false;
+    let html = crate::html::new_tab(&app, 0);
+    assert!(!html.contains(">Pinned<"));
+    assert!(html.contains(">Workspaces<"), "the others are untouched");
+}
+
+#[test]
+fn the_settings_page_lists_every_binding_and_error() {
+    let mut app = App::new();
+    app.settings.startup = Startup::RestoreSession;
+    let html = crate::html::settings(&app, 0);
+    for b in BindingId::ALL {
+        assert!(html.contains(b.label()), "{b:?} is listed");
+    }
+    for k in ErrorKind::ALL {
+        assert!(
+            html.contains(&crate::html::escape(k.spec().name)),
+            "{k} is previewable"
+        );
+    }
+    for w in &app.workspaces.spaces {
+        assert!(html.contains(&w.name), "every workspace gets a notification rule");
+    }
 }

@@ -8,7 +8,7 @@ use objc2::rc::Retained;
 use objc2::MainThreadMarker;
 use objc2_app_kit::{NSAnimatablePropertyContainer, NSTextField, NSView};
 
-use compact_core::command::SHORTCUTS;
+use compact_core::command::shortcuts;
 use compact_core::theme::{accent, bg, border, fg, fill, metric, radius, Rgba};
 use compact_core::{chrome::TabLayout, App, Overlay};
 
@@ -510,7 +510,7 @@ impl Overlays {
                     for (j, p) in card.previews.iter().enumerate() {
                         let widths = [0.86, 0.64, 0.72];
                         set_frame(
-                            &p,
+                            p,
                             rect(16.0, 96.0 + j as f64 * 13.0, (cw - 32.0) * widths[j], 7.0),
                         );
                     }
@@ -531,7 +531,10 @@ impl Overlays {
         set_frame(&self.keymap_root, rect(0.0, 0.0, w, h));
 
         let pw = (w * 0.88).min(660.0);
-        let rows = SHORTCUTS.len().div_ceil(2);
+        // Read from the live keymap: bindings are editable, and the overlay
+        // whose job is telling you which key does what must not show defaults.
+        let keys = shortcuts(&app.settings.keymap);
+        let rows = keys.len().div_ceil(2);
         let ph = 26.0 + 40.0 + rows as f64 * 33.0 + 26.0;
         let px = (w - pw) / 2.0;
         let py = (h - ph) / 2.0;
@@ -539,13 +542,13 @@ impl Overlays {
         set_frame(&self.keymap_title, rect(28.0, 24.0, 200.0, 20.0));
         set_frame(&self.keymap_sub, rect(pw - 240.0, 27.0, 212.0, 14.0));
 
-        while self.keymap_rows.len() < SHORTCUTS.len() {
+        while self.keymap_rows.len() < keys.len() {
             let r = Row::new(&self.keymap_panel);
             self.keymap_rows.push(r);
         }
         let col_w = (pw - 56.0 - 34.0) / 2.0;
         for (i, row) in self.keymap_rows.iter().enumerate() {
-            match SHORTCUTS.get(i) {
+            match keys.get(i) {
                 None => set_hidden(&row.root, true),
                 Some(s) => {
                     // Two columns, filling left-to-right like the CSS grid.
@@ -560,7 +563,7 @@ impl Overlays {
                     set_text(&row.label, s.label);
                     set_color(&row.label, Rgba::hex(0xB9B9C2));
                     set_frame(&row.hint, rect(col_w - 84.0, 9.0, 80.0, 14.0));
-                    set_text(&row.hint, s.keys);
+                    set_text(&row.hint, &s.keys);
                     set_color(&row.hint, Rgba::hex(0x787882));
                 }
             }
@@ -699,10 +702,10 @@ impl Overlays {
             return None;
         }
         let pad = 24.0;
-        if y >= 26.0 && y < 50.0 && lx > sw - pad - 60.0 {
+        if (26.0..50.0).contains(&y) && lx > sw - pad - 60.0 {
             return Some(SettingsHit::Close);
         }
-        if y >= 98.0 && y < 135.0 {
+        if (98.0..135.0).contains(&y) {
             let half = (sw - pad * 2.0) / 2.0;
             return Some(if lx < pad + half {
                 SettingsHit::Layout(TabLayout::Vertical)

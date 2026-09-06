@@ -5,6 +5,7 @@
 //! tabs, and closing the active tab focuses its left neighbour rather than
 //! jumping to the end.
 
+use crate::page::{ErrorKind, PageKind};
 use crate::tab::{TabId, TabIdGen, TabMeta, TabState};
 use crate::theme::{Rgba, WORKSPACE_DOTS};
 
@@ -151,7 +152,7 @@ impl WorkspaceSet {
     pub fn new_tab(&mut self) -> TabId {
         let id = self.ids.next();
         self.clock += 1;
-        let mut tab = TabMeta::new(id, "New tab", "compact.app/new");
+        let mut tab = TabMeta::internal(id, PageKind::NewTab);
         tab.last_active = self.clock;
         let ws = self.current_mut();
         ws.tabs.push(tab);
@@ -227,12 +228,50 @@ impl WorkspaceSet {
     }
 
     /// Update title and host after a navigation commits.
+    ///
+    /// A navigation always lands on the web: any tab that was showing one of
+    /// Compact's own pages stops being internal here, which is what keeps the
+    /// error page from re-rendering over the site you just retried.
     pub fn set_location(&mut self, id: TabId, title: &str, host: &str, url: &str) {
         for w in &mut self.spaces {
             if let Some(t) = w.tab_mut(id) {
                 t.title = title.to_string();
                 t.host = host.to_string();
                 t.url = url.to_string();
+                t.kind = PageKind::Web;
+                t.error = None;
+                return;
+            }
+        }
+    }
+
+    /// Turn a tab into one of Compact's own pages.
+    ///
+    /// The failed host is deliberately preserved for an error page: it is what
+    /// the page's header reads out, and what ⌘R retries.
+    pub fn set_page(&mut self, id: TabId, kind: PageKind, error: Option<ErrorKind>) {
+        for w in &mut self.spaces {
+            if let Some(t) = w.tab_mut(id) {
+                t.kind = kind;
+                t.error = error;
+                match kind {
+                    PageKind::NewTab => {
+                        t.title = "New tab".into();
+                        t.host = crate::page::NEW_TAB_URL.into();
+                        t.url = crate::page::NEW_TAB_URL.into();
+                    }
+                    PageKind::Settings => {
+                        t.title = "Settings".into();
+                        t.host = crate::page::SETTINGS_URL.into();
+                        t.url = crate::page::SETTINGS_URL.into();
+                    }
+                    PageKind::Error => {
+                        if let Some(e) = error {
+                            t.title = e.spec().name.into();
+                        }
+                    }
+                    PageKind::Web => {}
+                }
                 return;
             }
         }

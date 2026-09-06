@@ -220,3 +220,23 @@ pub mod font {
     pub const UI_FALLBACK: &str = "SF Pro Text";
     pub const MONO_FALLBACK: &str = "SF Mono";
 }
+
+impl Rgba {
+    /// CSS colour literal, for the internal pages rendered as HTML.
+    ///
+    /// Opaque colours emit `#rrggbb` and translucent ones `rgba(...)`, which is
+    /// exactly how the canvas writes them — so a token can be diffed against
+    /// the design by eye.
+    pub fn css(self) -> String {
+        let (r, g, b) = (
+            (self.r * 255.0).round() as u32,
+            (self.g * 255.0).round() as u32,
+            (self.b * 255.0).round() as u32,
+        );
+        if self.a >= 1.0 {
+            format!("#{r:02x}{g:02x}{b:02x}")
+        } else {
+            format!("rgba({r},{g},{b},{:.3})", self.a)
+        }
+    }
+}

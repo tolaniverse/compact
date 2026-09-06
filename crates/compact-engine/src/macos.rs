@@ -20,6 +20,8 @@ use objc2_core_foundation::CGRect;
 use objc2_foundation::{NSData, NSKeyedArchiver, NSString, NSURLRequest, NSURL};
 use objc2_web_kit::{WKWebView, WKWebViewConfiguration};
 
+use crate::bridge::{Bridge, HANDLER_NAME};
+
 use compact_core::tab::TabId;
 
 use crate::{EngineError, Hibernation, Result, TabEngine};
@@ -48,6 +50,10 @@ pub struct WebKitEngine {
     /// to be the lever here and is now deprecated as a no-op, so the shared
     /// configuration is the whole mechanism.
     config: Retained<WKWebViewConfiguration>,
+    /// The script-message handler and navigation delegate, shared by every web
+    /// view. One object rather than one per tab: it is stateless, and the
+    /// events it emits already say which view they came from.
+    bridge: Retained<Bridge>,
     /// The superview live tabs are mounted into. A web view outside a view
     /// hierarchy will not reliably run its renderer, so even the headless
     /// harness supplies one.
@@ -66,9 +72,20 @@ impl WebKitEngine {
     /// Build an engine that mounts tabs into `container`.
     pub fn new(mtm: MainThreadMarker, container: Retained<NSView>) -> Self {
         let config = unsafe { WKWebViewConfiguration::new(mtm) };
+        let bridge = Bridge::new(mtm);
+        // Registered on the shared configuration, so every web view built from
+        // it can talk back without per-tab setup.
+        unsafe {
+            let ucc = config.userContentController();
+            ucc.addScriptMessageHandler_name(
+                objc2::runtime::ProtocolObject::from_ref(&*bridge),
+                &NSString::from_str(HANDLER_NAME),
+            );
+        }
         Self {
             mtm,
             config,
+            bridge,
             container,
             views: HashMap::new(),
             sessions: HashMap::new(),
@@ -100,6 +117,11 @@ impl WebKitEngine {
             let v = WKWebView::alloc(self.mtm);
             WKWebView::initWithFrame_configuration(v, frame, &self.config)
         };
+        unsafe {
+            view.setNavigationDelegate(Some(objc2::runtime::ProtocolObject::from_ref(
+                &*self.bridge,
+            )));
+        }
         // Track the container on resize; the chrome floats above the page
         // rather than insetting it, so the page is always full-bleed.
         view.setAutoresizingMask(
@@ -178,6 +200,49 @@ impl WebKitEngine {
     /// The live view for a tab, for the UI layer to size or focus.
     pub fn view(&self, id: TabId) -> Option<&WKWebView> {
         self.views.get(&id).map(|v| &**v)
+    }
+
+    /// Which tab a web view belongs to, by address.
+    ///
+    /// The delegate reports a `WKWebView`, and everything above the engine
+    /// speaks [`TabId`]. This is the only translation between the two.
+    pub fn tab_of(&self, view_addr: usize) -> Option<TabId> {
+        self.views
+            .iter()
+            .find(|(_, v)| Retained::as_ptr(v) as usize == view_addr)
+            .map(|(id, _)| *id)
+    }
+
+    /// Render markup we generated into a tab, creating its view if needed.
+    ///
+    /// The base URL is deliberately `nil`, which gives the document a unique
+    /// opaque origin: no network reach, no site's storage, and nothing on the
+    /// web able to reach it. The internal pages need none of that — they talk
+    /// to the app over the message handler and nowhere else.
+    ///
+    /// It must not be `compact://…`. WebKit does not recognise the scheme, so
+    /// it hands the URL to LaunchServices, which answers with a system alert
+    /// asking which application should open it. `id`'s own address stays
+    /// `compact://newtab` in the tab model, which is what the address bar
+    /// reads — the web view simply never sees it.
+    pub fn load_html(&mut self, id: TabId, html: &str, address: &str) -> Result<()> {
+        let view = match self.views.get(&id) {
+            Some(v) => v.clone(),
+            None => self.make_view(id),
+        };
+        let ns = NSString::from_str(html);
+        unsafe { view.loadHTMLString_baseURL(&ns, None) };
+        self.urls.insert(id, address.to_string());
+        Ok(())
+    }
+
+    /// Reload whatever the tab is already showing.
+    pub fn reload(&mut self, id: TabId) {
+        if let Some(v) = self.views.get(&id) {
+            unsafe {
+                let _: Option<Retained<objc2_web_kit::WKNavigation>> = msg_send![&**v, reload];
+            }
+        }
     }
 
     /// Whether a navigation is in flight, and how far along it is.

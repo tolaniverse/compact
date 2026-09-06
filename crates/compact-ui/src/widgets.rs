@@ -313,8 +313,6 @@ pub fn breathe(l: &Layer, from: f64, to: f64, period: f64) {
 
 /// Horizontally offset a view's backing layer, in points.
 ///
-/// Translation only. Rotation and scale would need the layer's `anchorPoint` at
-
 /// A view's backing layer, as the untyped pointer AppKit hands back.
 pub fn host_layer<T: objc2::Message>(view: &T) -> *mut AnyObject {
     unsafe { msg_send![view, layer] }

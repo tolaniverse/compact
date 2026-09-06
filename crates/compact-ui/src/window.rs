@@ -22,12 +22,12 @@ use objc2_app_kit::{
 use objc2_core_foundation::CGRect;
 use objc2_foundation::{NSString, NSTimer};
 
-use compact_core::command::{resolve, Action, Mods};
+use compact_core::command::{Action, Mods};
 use compact_core::policy::LiveBudget;
 use compact_core::tab::TabId;
 use compact_core::theme::{bg, radius};
 use compact_core::{App, Effect, Overlay};
-use compact_engine::{TabEngine, WebKitEngine};
+use compact_engine::{EngineEvent, TabEngine, WebKitEngine};
 use compact_mem::{Guard, PressureMonitor};
 
 use crate::chrome::{Chrome, Hit};
@@ -99,6 +99,16 @@ impl Inner {
                     let _ = self.engine.hibernate(id);
                 }
                 Effect::Destroy(id) => self.engine.destroy(id),
+                Effect::RenderInternal(id, html) => {
+                    let base = self
+                        .app
+                        .workspaces
+                        .locate(id)
+                        .map(|(_, t)| t.url.clone())
+                        .unwrap_or_else(|| compact_core::page::NEW_TAB_URL.to_string());
+                    let _ = self.engine.load_html(id, &html, &base);
+                }
+                Effect::Reload(id) => self.engine.reload(id),
                 // Deferred: the render that follows is what makes these
                 // visible, and focusing a hidden field does nothing.
                 Effect::FocusAddressField => self.pending_focus = Some(Focus::Address),
@@ -156,7 +166,7 @@ impl Inner {
         // Mount the incoming page beside the outgoing one, already tilted to
         // the side it arrives from.
         self.engine.mount_alongside(active);
-        let Some(incoming) = self.engine.view(active).map(|v| host_layer(v)) else {
+        let Some(incoming) = self.engine.view(active).map(host_layer) else {
             self.engine.show(active);
             return;
         };
@@ -270,6 +280,53 @@ impl Inner {
                 }
             });
         }
+    }
+
+    /// Turn queued web-view events into app state.
+    fn drain_engine_events(&mut self) {
+        for event in compact_engine::drain_events() {
+            match event {
+                EngineEvent::Message { view, body } => {
+                    // Only the visible tab can be clicked, and honouring a
+                    // message from any other view would let a background page
+                    // drive the UI.
+                    let active = self.app.workspaces.current().active;
+                    if self.engine.tab_of(view) != Some(active) {
+                        continue;
+                    }
+                    let Some(msg) = compact_core::bridge::parse(&body) else {
+                        continue;
+                    };
+                    let fx = self.app.on_page_message(msg);
+                    self.settle(fx);
+                }
+                EngineEvent::Failed { view, code } => {
+                    let Some(id) = self.engine.tab_of(view) else { continue };
+                    // A failure reported against a tab already showing one of
+                    // our pages is the internal load itself, which cannot fail
+                    // in any way worth explaining.
+                    if self.internal(id) {
+                        continue;
+                    }
+                    let fx = self.app.fail_navigation(id, code);
+                    self.settle(fx);
+                }
+                EngineEvent::Crashed { view } => {
+                    let Some(id) = self.engine.tab_of(view) else { continue };
+                    let fx = self
+                        .app
+                        .show_error(id, compact_core::page::ErrorKind::Crash);
+                    self.settle(fx);
+                }
+            }
+        }
+    }
+
+    fn internal(&self, id: TabId) -> bool {
+        self.app
+            .workspaces
+            .locate(id)
+            .is_some_and(|(_, t)| t.kind.is_internal())
     }
 
     fn dispatch(&mut self, action: Action) {
@@ -429,6 +486,7 @@ impl Shell {
         }
 
         install_monitors(&inner);
+        install_bridge(&inner);
         install_ticker(&inner);
         install_load_poll(&inner);
 
@@ -436,6 +494,15 @@ impl Shell {
         ns_app.activate();
         ns_app.run();
         Ok(())
+    }
+}
+
+/// Normalise a keystroke's characters, naming the one key AppKit reports as a
+/// control character rather than a word.
+fn chars_or_escape(chars: &str) -> String {
+    match chars {
+        "\u{1b}" => "Escape".to_string(),
+        other => other.to_string(),
     }
 }
 
@@ -468,9 +535,21 @@ fn install_monitors(inner: &Rc<RefCell<Inner>>) {
             .unwrap_or_default();
         let mods = mods_of(event);
 
+        // A settings row waiting for a chord swallows everything, including
+        // bindings that would otherwise fire — that is the whole point of
+        // record mode, and it is why ESC has to be the way out of it.
+        if let Some(fx) = i.app.record_chord(&chars_or_escape(&chars), mods) {
+            i.settle(fx);
+            return std::ptr::null_mut();
+        }
+
         // A focused text field owns most keys; only the bindings that must work
-        // while typing are intercepted ahead of it.
-        let editing = i.app.overlay == Overlay::Palette || i.chrome.address_editing();
+        // while typing are intercepted ahead of it. That includes fields inside
+        // an internal page, which the shell only knows about because the page
+        // says so.
+        let in_address = i.chrome.address_editing();
+        let editing =
+            i.app.overlay == Overlay::Palette || in_address || i.app.page_field_focused;
 
         // Palette navigation.
         if i.app.overlay == Overlay::Palette {
@@ -504,8 +583,11 @@ fn install_monitors(inner: &Rc<RefCell<Inner>>) {
             });
         }
 
-        // Address bar commit.
-        if editing && (chars == "\r" || chars == "\u{3}") && i.app.overlay != Overlay::Palette {
+        // Address bar commit. Gated on the address field specifically: a
+        // return pressed in the new-tab page's own search box belongs to that
+        // box, and committing the address bar instead would navigate to
+        // whatever it happened to be showing.
+        if in_address && (chars == "\r" || chars == "\u{3}") && i.app.overlay != Overlay::Palette {
             let typed = i.chrome.address_text();
             let fx = i.app.navigate(&typed);
             i.perform(fx);
@@ -517,11 +599,8 @@ fn install_monitors(inner: &Rc<RefCell<Inner>>) {
             return std::ptr::null_mut();
         }
 
-        let key = match chars.as_str() {
-            "\u{1b}" => "Escape".to_string(),
-            other => other.to_string(),
-        };
-        if let Some(action) = resolve(&key, mods, editing) {
+        let key = chars_or_escape(&chars);
+        if let Some(action) = i.app.resolve_key(&key, mods, editing) {
             if action == Action::Dismiss {
                 i.window.makeFirstResponder(None);
             }
@@ -670,6 +749,23 @@ fn install_monitors(inner: &Rc<RefCell<Inner>>) {
     std::mem::forget(click_block);
 }
 
+/// Drain what the web views told us.
+///
+/// Events are queued by the ObjC delegate and handled here on the next
+/// run-loop turn rather than inside the WebKit callback — reentering the app
+/// state from a delegate would mean borrowing `Inner` while it may already be
+/// borrowed further up the stack.
+fn install_bridge(inner: &Rc<RefCell<Inner>>) {
+    let handler = inner.clone();
+    compact_engine::on_event(move || {
+        let me = handler.clone();
+        queue_after(0.0, move || {
+            let Ok(mut i) = me.try_borrow_mut() else { return };
+            i.drain_engine_events();
+        });
+    });
+}
+
 /// Low-frequency housekeeping: expire toasts, follow page titles, and act on
 /// memory pressure. One second is deliberate — none of this is animation, and a
 /// display-linked timer would burn power to redraw text that rarely changes.
@@ -695,6 +791,12 @@ fn install_ticker(inner: &Rc<RefCell<Inner>>) {
             .collect();
         let current_ws = i.app.workspaces.current;
         for (ws, id) in ids {
+            // One of our own pages: its title and host are ours to set, and
+            // adopting what the web view reports would turn it into a web tab
+            // pointing at `compact://newtab`.
+            if i.app.workspaces.locate(id).is_some_and(|(_, t)| t.kind.is_internal()) {
+                continue;
+            }
             let Some(title) = i.engine.title(id) else {
                 continue;
             };
@@ -716,14 +818,15 @@ fn install_ticker(inner: &Rc<RefCell<Inner>>) {
                 .next()
                 .unwrap_or("")
                 .to_string();
-            i.app.workspaces.set_location(id, &title, &host, &url);
+            i.app.adopt_title(id, &title, &host, &url);
             dirty = true;
 
             // `insert` reports true the first time, which is the initial load.
             let first_load = i.titled.insert(id);
             if !first_load && ws != current_ws {
-                i.app.notifications.push(ws, title, host, id, now);
-                i.app.workspaces.add_unread(ws);
+                // Routed through the app so the workspace's notification mode
+                // gets a say in whether this interrupts.
+                i.app.post_activity(ws, title, host, id, now);
             }
         }
 

@@ -8,6 +8,8 @@
 
 use crate::bookmark::BookmarkId;
 use crate::chrome::TabLayout;
+use crate::page::ErrorKind;
+use crate::settings::Keymap;
 use crate::tab::TabId;
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -21,6 +23,8 @@ pub enum Action {
     FocusAddress,
     OpenPalette,
     OpenSettings,
+    /// The full settings page (⌘⇧,), which opens as a tab rather than a drawer.
+    OpenSettingsPage,
     OpenShortcuts,
     OpenSwitcher,
     SwitchWorkspace(usize),
@@ -31,6 +35,15 @@ pub enum Action {
     OpenBookmark(BookmarkId),
     /// Forget a bookmark.
     RemoveBookmark(BookmarkId),
+    /// Reload the active tab, or re-attempt whatever the error page failed at.
+    Retry,
+    /// Turn the active tab back into a new-tab page.
+    GoHome,
+    /// Render an error page in the active tab. Reached from the settings
+    /// page's preview chips and from the palette — the same affordance the
+    /// canvas ships, and the only way to read six of these pages on a machine
+    /// whose network is working.
+    ShowError(ErrorKind),
     /// ESC / scrim click: close whatever overlay is on top.
     Dismiss,
 }
@@ -75,9 +88,23 @@ pub fn command_list(layout: TabLayout, pinned: bool, bookmarked: bool) -> Vec<Co
             hint: "",
             action: Action::TogglePin,
         },
-        Command { icon: "⚙", label: "Settings".into(), hint: "⌘,", action: Action::OpenSettings },
+        Command { icon: "↻", label: "Reload page".into(), hint: "⌘R", action: Action::Retry },
+        Command { icon: "⌂", label: "New tab page".into(), hint: "", action: Action::GoHome },
+        Command { icon: "⚙", label: "Quick settings".into(), hint: "⌘,", action: Action::OpenSettings },
+        Command { icon: "☰", label: "All settings".into(), hint: "⌘⇧,", action: Action::OpenSettingsPage },
         Command { icon: "⌨", label: "Keyboard shortcuts".into(), hint: "?", action: Action::OpenShortcuts },
     ]
+    .into_iter()
+    // The error pages are previewable from the palette, exactly as the canvas
+    // has them. They are the one part of the product you cannot otherwise see
+    // on demand, because seeing them for real requires something to go wrong.
+    .chain(ErrorKind::ALL.into_iter().map(|k| Command {
+        icon: "⚠",
+        label: format!("Preview error — {}", k.spec().name),
+        hint: "",
+        action: Action::ShowError(k),
+    }))
+    .collect()
 }
 
 /// Filter the palette by query.
@@ -97,28 +124,6 @@ pub fn filter(commands: Vec<Command>, query: &str) -> Vec<Command> {
         .collect()
 }
 
-/// One row of the shortcuts overlay.
-pub struct Shortcut {
-    pub label: &'static str,
-    pub keys: &'static str,
-}
-
-/// The shortcuts overlay contents, in the canvas's order.
-pub const SHORTCUTS: &[Shortcut] = &[
-    Shortcut { label: "Command palette", keys: "⌘K" },
-    Shortcut { label: "Address bar", keys: "⌘L" },
-    Shortcut { label: "New tab", keys: "⌘T" },
-    Shortcut { label: "Close tab", keys: "⌘W" },
-    Shortcut { label: "Workspace 1–3", keys: "⌘1–3" },
-    Shortcut { label: "Workspace switcher", keys: "⌘Space" },
-    Shortcut { label: "Jump to notification", keys: "⌘⇧J" },
-    Shortcut { label: "Bookmark tab", keys: "⌘D" },
-    Shortcut { label: "Toggle tab layout", keys: "⌘E" },
-    Shortcut { label: "Settings", keys: "⌘," },
-    Shortcut { label: "Shortcuts", keys: "?" },
-    Shortcut { label: "Dismiss", keys: "ESC" },
-];
-
 /// Modifier state for a key event.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct Mods {
@@ -129,43 +134,48 @@ pub struct Mods {
     pub alt: bool,
 }
 
-/// Resolve a keystroke to an action.
+/// Resolve a keystroke to an action against the live keymap.
 ///
-/// `text_field_focused` suppresses the bare `?` binding — otherwise typing a
-/// question mark into the address bar would open the shortcuts overlay.
-pub fn resolve(key: &str, mods: Mods, text_field_focused: bool) -> Option<Action> {
+/// Three things are matched outside the table, because none of them is a single
+/// chord: `Escape` (always dismisses, and must keep working even if the user
+/// rebinds everything else), `⌘1–9` (a digit range, see
+/// [`BindingId::Workspace`](crate::settings::BindingId::Workspace)), and the
+/// bare `?` — which is in the table, but must not fire while a text field has
+/// the keyboard or typing a question mark would open the shortcuts overlay.
+pub fn resolve(keymap: &Keymap, key: &str, mods: Mods, text_field_focused: bool) -> Option<Action> {
     if key == "Escape" {
         return Some(Action::Dismiss);
     }
 
-    if mods.cmd {
-        // ⌘⇧J is checked before the plain-⌘ bindings because `j` alone is not
-        // bound; ordering only matters if that changes.
-        if mods.shift && key.eq_ignore_ascii_case("j") {
-            return Some(Action::JumpLatestNotification);
-        }
-        if key == " " || key == "Space" {
-            return Some(Action::OpenSwitcher);
-        }
+    if mods.cmd && !mods.shift && key.len() == 1 {
         if let Some(d) = key.chars().next().filter(|c| c.is_ascii_digit() && *c != '0') {
-            if key.len() == 1 {
-                return Some(Action::SwitchWorkspace(d as usize - '1' as usize));
-            }
+            return Some(Action::SwitchWorkspace(d as usize - '1' as usize));
         }
-        return match key.to_lowercase().as_str() {
-            "k" => Some(Action::OpenPalette),
-            "l" => Some(Action::FocusAddress),
-            "t" => Some(Action::NewTab),
-            "w" => Some(Action::CloseActiveTab),
-            "d" => Some(Action::ToggleBookmark),
-            "e" => Some(Action::ToggleLayout),
-            "," => Some(Action::OpenSettings),
-            _ => None,
-        };
     }
 
-    if key == "?" && !text_field_focused {
-        return Some(Action::OpenShortcuts);
+    let id = keymap.lookup(key, mods)?;
+    // An unmodified binding belongs to the focused field first.
+    if text_field_focused && !mods.cmd && !mods.alt {
+        return None;
     }
-    None
+    id.action()
+}
+
+/// One row of the shortcuts overlay.
+pub struct Shortcut {
+    pub label: &'static str,
+    pub keys: String,
+}
+
+/// The shortcuts overlay contents, read from the live keymap.
+///
+/// Previously a static table, which quietly became a lie the moment bindings
+/// became editable: the overlay whose entire job is telling you which key does
+/// what must not be the one surface that shows the defaults.
+pub fn shortcuts(keymap: &Keymap) -> Vec<Shortcut> {
+    keymap
+        .rows()
+        .map(|(b, keys)| Shortcut { label: b.label(), keys })
+        .chain(std::iter::once(Shortcut { label: "Dismiss", keys: "ESC".to_string() }))
+        .collect()
 }

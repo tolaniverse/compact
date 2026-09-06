@@ -14,10 +14,14 @@
 //! draining the returned [`Effect`]s.
 
 pub mod bookmark;
+pub mod bridge;
 pub mod chrome;
 pub mod command;
+pub mod html;
 pub mod notify;
+pub mod page;
 pub mod policy;
+pub mod settings;
 pub mod tab;
 pub mod theme;
 pub mod workspace;
@@ -26,11 +30,15 @@ pub mod workspace;
 mod tests;
 
 use bookmark::Bookmarks;
+use bridge::{Incoming, PageMessage};
 use chrome::{ChromeConfig, ChromeVisibility, Reveal};
-use command::{Action, Command};
+use command::{Action, Command, Mods};
 use notify::Notifications;
+use page::{ErrorKind, PageKind};
 use policy::{LiveBudget, MemoryReport, Pressure};
+use settings::{NotifMode, Settings};
 use tab::{TabId, TabState};
+use theme::Rgba;
 use workspace::WorkspaceSet;
 
 /// Which modal surface, if any, is on top.
@@ -67,6 +75,14 @@ pub enum Effect {
     FocusPaletteField,
     /// Begin a workspace slide; `+1` travels right, `-1` left.
     SlideWorkspace(i8),
+    /// Render one of Compact's own pages into this tab's web view.
+    ///
+    /// Carries the finished markup rather than a page identifier so the shell
+    /// has no say in what an internal page contains — [`html`] is the only
+    /// place that decides, and it is testable without a window.
+    RenderInternal(TabId, String),
+    /// Reload whatever the tab is already pointing at.
+    Reload(TabId),
 }
 
 /// Floor for a freshly-started navigation, so the bar is visible immediately.
@@ -166,6 +182,30 @@ fn percent_encode(s: &str) -> String {
     out
 }
 
+/// One row of the new-tab page's RECENT list.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Visit {
+    pub title: String,
+    pub host: String,
+    pub url: String,
+}
+
+impl Visit {
+    /// Tint for the square chip, derived from the host so a site keeps the
+    /// same colour across sessions without anything being stored.
+    pub fn tint(&self) -> Rgba {
+        let dots = theme::WORKSPACE_DOTS;
+        dots[self.host.len() % dots.len()]
+    }
+}
+
+/// How many visits the new-tab page remembers.
+///
+/// Deliberately small and in-memory only. A browser whose pitch is not
+/// accumulating state should not quietly grow a history file; this is a
+/// convenience for the current session, and it dies with it.
+pub const HISTORY_LIMIT: usize = 6;
+
 /// The whole application state.
 pub struct App {
     pub workspaces: WorkspaceSet,
@@ -176,6 +216,11 @@ pub struct App {
     pub bookmarks: Bookmarks,
     pub budget: LiveBudget,
     pub pressure: Pressure,
+    /// The full settings page's state: startup, new-tab blocks, per-workspace
+    /// notification modes, and the keymap.
+    pub settings: Settings,
+    /// Most-recently-visited first, deduplicated by host.
+    pub history: Vec<Visit>,
 
     /// Palette query and highlighted row.
     pub query: String,
@@ -185,6 +230,14 @@ pub struct App {
     /// tab's host; `Some` means the user has typed and owns the field until
     /// they commit or the active tab changes.
     pub address_draft: Option<String>,
+
+    /// Whether a text field *inside* an internal page holds the keyboard.
+    ///
+    /// The shell cannot see into a web view, so the page says so itself. Without
+    /// it, typing `?` into the new-tab search box would open the shortcuts
+    /// overlay instead of the character — the bare bindings have to yield to a
+    /// focused field wherever that field lives.
+    pub page_field_focused: bool,
 
     /// Whether the address bar has been asked for (⌘L, the palette, a click on
     /// it). Cleared as soon as the user is done with it — on commit, on Escape,
@@ -223,10 +276,13 @@ impl App {
             bookmarks: Bookmarks::seeded(),
             budget: LiveBudget::default(),
             pressure: Pressure::Normal,
+            settings: Settings::default(),
+            history: Vec::new(),
             query: String::new(),
             selection: 0,
             address_draft: None,
             address_summoned: false,
+            page_field_focused: false,
             hint_visible: true,
             clock: 0,
             measured_footprint: None,
@@ -318,6 +374,10 @@ impl App {
             // A toast occupies the same corner of the user's attention and is
             // actually about something; the hint yields to it.
             && self.notifications.is_empty()
+            // The new-tab page is its own onboarding — it names ⌘K and ⌘D and
+            // ⌘1–3 on the page itself. A floating hint over it is one more
+            // thing to read saying less.
+            && self.workspaces.current().active_tab().kind != PageKind::NewTab
     }
 
     // ---- input --------------------------------------------------------------
@@ -386,8 +446,50 @@ impl App {
                 let id = self.workspaces.new_tab();
                 self.address_draft = None;
                 self.hint_visible = false;
-                fx.push(Effect::Load(id, "https://compact.app/new".into()));
+                self.render_internal(id, &mut fx);
                 self.reconcile_into(&mut fx);
+            }
+            Action::OpenSettingsPage => {
+                self.overlay = Overlay::None;
+                self.hint_visible = false;
+                let id = self.workspaces.new_tab();
+                self.workspaces.set_page(id, PageKind::Settings, None);
+                self.address_draft = None;
+                self.render_internal(id, &mut fx);
+                self.reconcile_into(&mut fx);
+            }
+            Action::GoHome => {
+                let id = self.workspaces.current().active;
+                self.workspaces.set_page(id, PageKind::NewTab, None);
+                self.address_draft = None;
+                self.render_internal(id, &mut fx);
+            }
+            Action::ShowError(kind) => {
+                self.overlay = Overlay::None;
+                let id = self.workspaces.current().active;
+                self.workspaces.set_page(id, PageKind::Error, Some(kind));
+                self.address_draft = None;
+                self.render_internal(id, &mut fx);
+            }
+            Action::Retry => {
+                let id = self.workspaces.current().active;
+                let Some((_, tab)) = self.workspaces.locate(id) else {
+                    return fx;
+                };
+                match tab.kind {
+                    // Re-attempt the navigation that failed. `Load` rather than
+                    // `Reload`: the view is showing our error markup, so there
+                    // is nothing there to reload.
+                    PageKind::Error => {
+                        let url = tab.url.clone();
+                        self.workspaces.set_page(id, PageKind::Web, None);
+                        fx.push(Effect::Load(id, url));
+                    }
+                    PageKind::Web => fx.push(Effect::Reload(id)),
+                    // Redrawing an internal page is the honest meaning of
+                    // reload here, and it picks up any setting changed since.
+                    PageKind::NewTab | PageKind::Settings => self.render_internal(id, &mut fx),
+                }
             }
             Action::CloseActiveTab => {
                 let id = self.workspaces.current().active;
@@ -418,6 +520,162 @@ impl App {
         fx
     }
 
+    // ---- internal pages -----------------------------------------------------
+
+    /// Queue a redraw of `id` if it is one of Compact's own pages.
+    fn render_internal(&mut self, id: TabId, fx: &mut Vec<Effect>) {
+        let Some((_, tab)) = self.workspaces.locate(id) else {
+            return;
+        };
+        if !tab.kind.is_internal() {
+            return;
+        }
+        let tab = tab.clone();
+        // Replacing the visible document destroys whatever field held the
+        // keyboard. A background prewarm does not, so the check is on the
+        // active tab rather than on rendering at all.
+        if id == self.workspaces.current().active {
+            self.page_field_focused = false;
+        }
+        if let Some(markup) = html::render(self, &tab) {
+            fx.push(Effect::RenderInternal(id, markup));
+        }
+    }
+
+    /// Redraw the visible internal page, if any.
+    ///
+    /// Called after every settings mutation. The settings page is itself an
+    /// internal page, so a toggle has to repaint the thing you toggled it on —
+    /// there is no widget tree to update in place.
+    pub fn refresh_active_page(&mut self) -> Vec<Effect> {
+        let mut fx = Vec::new();
+        let id = self.workspaces.current().active;
+        self.render_internal(id, &mut fx);
+        fx
+    }
+
+    /// Show an error page for a navigation that failed.
+    ///
+    /// `None` from [`ErrorKind::from_url_error`] means the failure was not one
+    /// — a cancelled load, most often a redirect — and nothing is drawn.
+    pub fn fail_navigation(&mut self, id: TabId, code: isize) -> Vec<Effect> {
+        let Some(kind) = ErrorKind::from_url_error(code) else {
+            return Vec::new();
+        };
+        self.show_error(id, kind)
+    }
+
+    /// Show `kind` in `id`, wherever that tab lives.
+    pub fn show_error(&mut self, id: TabId, kind: ErrorKind) -> Vec<Effect> {
+        let mut fx = Vec::new();
+        if self.workspaces.locate(id).is_none() {
+            return fx;
+        }
+        self.workspaces.set_page(id, PageKind::Error, Some(kind));
+        self.render_internal(id, &mut fx);
+        fx
+    }
+
+    // ---- the page bridge ----------------------------------------------------
+
+    /// Act on a message from an internal page.
+    pub fn on_page_message(&mut self, incoming: Incoming) -> Vec<Effect> {
+        // Record where the page was before doing anything: acting on the
+        // message usually regenerates the document, and the offset is the one
+        // thing that cannot be rebuilt from app state.
+        let active = self.workspaces.current().active;
+        for w in &mut self.workspaces.spaces {
+            if let Some(t) = w.tab_mut(active) {
+                t.scroll = incoming.scroll;
+                break;
+            }
+        }
+        match incoming.message {
+            PageMessage::Navigate(input) => self.navigate(&input),
+            PageMessage::Do(action) => self.apply(action),
+            PageMessage::OpenBookmark(id) => self.apply(Action::OpenBookmark(id)),
+            PageMessage::SwitchWorkspace(i) => self.apply(Action::SwitchWorkspace(i)),
+            PageMessage::SetStartup(v) => {
+                self.settings.startup = v;
+                self.refresh_active_page()
+            }
+            PageMessage::ToggleBlock(slug) => {
+                self.settings.blocks.toggle(&slug);
+                self.refresh_active_page()
+            }
+            PageMessage::SetNotifMode(ws, mode) => {
+                self.settings.set_notif_mode(ws, mode);
+                self.refresh_active_page()
+            }
+            PageMessage::FieldFocus(on) => {
+                self.page_field_focused = on;
+                Vec::new()
+            }
+            PageMessage::Record(id) => {
+                self.settings.recording =
+                    if self.settings.recording == Some(id) { None } else { Some(id) };
+                self.refresh_active_page()
+            }
+        }
+    }
+
+    // ---- keymap -------------------------------------------------------------
+
+    /// Feed a keystroke to an in-progress binding recording.
+    ///
+    /// Returns the effects of accepting it, or `None` when nothing is being
+    /// recorded and the key should be resolved normally. Bare modifiers are
+    /// swallowed while recording — you cannot bind "⌘" on its own, and treating
+    /// the press as a chord would end the recording before the real key landed.
+    pub fn record_chord(&mut self, key: &str, mods: Mods) -> Option<Vec<Effect>> {
+        let id = self.settings.recording?;
+        if key == "Escape" {
+            self.settings.recording = None;
+            return Some(self.refresh_active_page());
+        }
+        if key.is_empty() || matches!(key, "Meta" | "Control" | "Alt" | "Shift") {
+            return Some(Vec::new());
+        }
+        self.settings
+            .keymap
+            .rebind(id, settings::Chord::from_event(key, mods));
+        self.settings.recording = None;
+        Some(self.refresh_active_page())
+    }
+
+    /// Resolve a keystroke against the live keymap.
+    pub fn resolve_key(&self, key: &str, mods: Mods, editing: bool) -> Option<Action> {
+        command::resolve(&self.settings.keymap, key, mods, editing)
+    }
+
+    // ---- notifications ------------------------------------------------------
+
+    /// Record background activity, subject to the workspace's notification mode.
+    ///
+    /// The unread count is incremented under every mode — a badge that lied
+    /// about how much you had missed would be worse than no badge — but only
+    /// [`NotifMode::All`], and [`NotifMode::Mentions`] for the workspace's own
+    /// foreground tab, actually interrupt.
+    pub fn post_activity(
+        &mut self,
+        ws: usize,
+        title: String,
+        host: String,
+        tab: TabId,
+        now: u64,
+    ) {
+        self.workspaces.add_unread(ws);
+        let foreground = self.workspaces.spaces.get(ws).map(|w| w.active) == Some(tab);
+        let allowed = match self.settings.notif_mode(ws) {
+            NotifMode::All => true,
+            NotifMode::Mentions => foreground,
+            NotifMode::Muted => false,
+        };
+        if allowed {
+            self.notifications.push(ws, title, host, tab, now);
+        }
+    }
+
     fn close_tab(&mut self, id: TabId) -> Vec<Effect> {
         let mut fx = Vec::new();
         if self.workspaces.close(id).is_some() {
@@ -435,12 +693,8 @@ impl App {
         self.address_draft = None;
         // Bring the tab back before running the budget, so the newly-focused
         // tab is never the one the same pass decides to evict.
-        if let Some((_, t)) = self.workspaces.locate(id) {
-            match t.state {
-                TabState::Hibernated => fx.push(Effect::Restore(id)),
-                TabState::Cold => fx.push(Effect::Load(id, t.url.clone())),
-                TabState::Live => {}
-            }
+        if let Some(e) = self.activation_effect(id) {
+            fx.push(e);
         }
         self.workspaces.set_state(id, TabState::Live);
         self.reconcile_into(&mut fx);
@@ -550,10 +804,31 @@ impl App {
         let id = self.workspaces.current().active;
         self.workspaces
             .set_location(id, &target.title, &target.display, &target.url);
+        self.remember(&target);
+        self.page_field_focused = false;
         self.address_draft = None;
         // Its job is done; leaving it up would cover the page you just asked for.
         self.address_summoned = false;
         vec![Effect::Load(id, target.url)]
+    }
+
+    /// Push a visit to the front of the recents list, deduplicated by host.
+    ///
+    /// By host rather than by URL: RECENT is a list of places, and five rows of
+    /// the same site's article pages would push everywhere else off it.
+    fn remember(&mut self, target: &Target) {
+        let host = target
+            .display
+            .split('/')
+            .next()
+            .unwrap_or(&target.display)
+            .to_string();
+        self.history.retain(|v| v.host != host);
+        self.history.insert(
+            0,
+            Visit { title: target.title.clone(), host, url: target.url.clone() },
+        );
+        self.history.truncate(HISTORY_LIMIT);
     }
 
     // ---- palette ------------------------------------------------------------
@@ -620,6 +895,20 @@ impl App {
         false
     }
 
+    /// Adopt the real page title once a navigation settles.
+    ///
+    /// Also corrects the recents list. The address bar can only guess a title
+    /// from the hostname at the moment you press return — "Rust-lang" for
+    /// `rust-lang.org` — and leaving that guess in RECENT would make the
+    /// new-tab page the one surface still showing it.
+    pub fn adopt_title(&mut self, id: TabId, title: &str, host: &str, url: &str) {
+        self.workspaces.set_location(id, title, host, url);
+        if let Some(v) = self.history.iter_mut().find(|v| v.host == host) {
+            v.title = title.to_string();
+            v.url = url.to_string();
+        }
+    }
+
     /// Record a measured footprint for a tab.
     pub fn record_footprint(&mut self, id: TabId, bytes: u64) {
         self.workspaces.set_footprint(id, bytes);
@@ -640,6 +929,26 @@ impl App {
         let mut fx = Vec::new();
         self.reconcile_into(&mut fx);
         fx
+    }
+
+    /// What it takes to put `id` back on screen, or `None` if it is already
+    /// there.
+    ///
+    /// Internal pages are always redrawn rather than restored. Their markup is
+    /// generated from current state, and `interactionState` — which serializes
+    /// a back/forward list, not a document — has nothing useful to say about a
+    /// page that was never fetched.
+    fn activation_effect(&self, id: TabId) -> Option<Effect> {
+        let (_, t) = self.workspaces.locate(id)?;
+        if t.kind.is_internal() {
+            let tab = t.clone();
+            return html::render(self, &tab).map(|m| Effect::RenderInternal(id, m));
+        }
+        match t.state {
+            TabState::Hibernated => Some(Effect::Restore(id)),
+            TabState::Cold => Some(Effect::Load(id, t.url.clone())),
+            TabState::Live => None,
+        }
     }
 
     fn reconcile_into(&mut self, fx: &mut Vec<Effect>) {
@@ -698,15 +1007,9 @@ impl App {
             wanted.truncate(room);
 
             for id in wanted {
-                if let Some((_, t)) = self.workspaces.locate(id) {
-                    let eff = match t.state {
-                        TabState::Hibernated => Effect::Restore(id),
-                        TabState::Cold => Effect::Load(id, t.url.clone()),
-                        TabState::Live => continue,
-                    };
-                    self.workspaces.set_state(id, TabState::Live);
-                    fx.push(eff);
-                }
+                let Some(eff) = self.activation_effect(id) else { continue };
+                self.workspaces.set_state(id, TabState::Live);
+                fx.push(eff);
             }
         }
     }

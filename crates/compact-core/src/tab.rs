@@ -8,6 +8,8 @@
 
 use core::fmt;
 
+use crate::page::{ErrorKind, PageKind};
+
 /// Opaque, stable, process-unique tab identifier.
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Debug)]
 pub struct TabId(pub u64);
@@ -73,6 +75,18 @@ pub struct TabMeta {
     /// Full URL, used to reload a `Cold` tab that has no session blob.
     pub url: String,
     pub state: TabState,
+    /// Whether this tab is showing a site or one of Compact's own pages.
+    pub kind: PageKind,
+    /// Vertical scroll offset of an internal page, in CSS pixels.
+    ///
+    /// Only internal pages need this. Changing a setting regenerates the whole
+    /// document, and without carrying the offset across, toggling anything
+    /// below the fold would throw you back to the top of the page. A web page's
+    /// scroll position is WebKit's business and rides in `interactionState`.
+    pub scroll: u32,
+    /// Which failure the error page is explaining. Only meaningful when
+    /// `kind` is [`PageKind::Error`].
+    pub error: Option<ErrorKind>,
     /// Monotonic activation counter. Higher means more recently focused; this
     /// is the LRU key. A logical clock rather than a timestamp, so ordering is
     /// exact and testable with no wall-clock dependency.
@@ -115,12 +129,28 @@ impl TabMeta {
             url: format!("https://{host}"),
             host,
             state: TabState::Cold,
+            kind: PageKind::Web,
+            error: None,
+            scroll: 0,
             last_active: 0,
             footprint: None,
             loading: false,
             progress: 0.0,
             completed_at: None,
         }
+    }
+
+    /// A tab showing one of Compact's own pages.
+    pub fn internal(id: TabId, kind: PageKind) -> Self {
+        let (title, url) = match kind {
+            PageKind::NewTab => ("New tab", crate::page::NEW_TAB_URL),
+            PageKind::Settings => ("Settings", crate::page::SETTINGS_URL),
+            PageKind::Error | PageKind::Web => ("Compact", crate::page::NEW_TAB_URL),
+        };
+        let mut t = Self::new(id, title, url);
+        t.url = url.to_string();
+        t.kind = kind;
+        t
     }
 
     /// Bytes this tab is assumed to cost the engine right now.
