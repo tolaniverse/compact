@@ -37,6 +37,17 @@ pub const REVEAL_THRESHOLD_MIN: f64 = 24.0;
 pub const REVEAL_THRESHOLD_MAX: f64 = 180.0;
 pub const REVEAL_THRESHOLD_STEP: f64 = 4.0;
 
+/// How long a deliberate chrome change stays on screen before hover resumes.
+///
+/// Toggling the layout reveals the surface it moved the tabs to, as
+/// confirmation. That reveal is otherwise a hover latch, so the next mouse
+/// movement clears it — and after a click on the strip's LAYOUT button the
+/// cursor is at the top right, nowhere near the edge that owns the sidebar it
+/// just revealed. The sidebar appeared and vanished inside one frame, the
+/// toggle read as a no-op, and clicking again put the layout back where it
+/// started. Long enough to be seen, short enough not to feel stuck.
+pub const REVEAL_HOLD_MS: u64 = 1400;
+
 /// Multiplier past which the top chrome retracts (canvas: `y > T * 3`).
 const RETRACT_TOP: f64 = 3.0;
 /// Multiplier past which the sidebar retracts (canvas: `x > T * 3.4`).

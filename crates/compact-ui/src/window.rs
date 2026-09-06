@@ -632,7 +632,7 @@ fn install_monitors(inner: &Rc<RefCell<Inner>>) {
         let (x, y) = point_of(&i, event);
         let size = i.size();
         let revealed = i.app.on_cursor(Some((x, y)), size);
-        if std::env::var_os("COMPACT_TRACE").is_some() {
+        if revealed && std::env::var_os("COMPACT_TRACE").is_some() {
             let v = i.app.visibility();
             eprintln!(
                 "[reveal] cursor=({x:.0},{y:.0}) size=({:.0},{:.0}) top={} side={} -> strip={} sidebar={} layout={:?}",
@@ -722,6 +722,9 @@ fn install_monitors(inner: &Rc<RefCell<Inner>>) {
         }
 
         let hit = i.chrome.hit(&i.app, x, y);
+        if std::env::var_os("COMPACT_TRACE").is_some() {
+            eprintln!("[click] ({x:.0},{y:.0}) hit={hit:?}");
+        }
 
         // Clicking anywhere that is not the address bar puts it away. It floats
         // over the page, so it has to leave the moment attention does.

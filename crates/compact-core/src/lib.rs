@@ -247,6 +247,13 @@ pub struct App {
     /// The onboarding hint, dismissed permanently on first real interaction.
     pub hint_visible: bool,
 
+    /// Clock time until which cursor movement cannot retract chrome.
+    ///
+    /// Set when the user changes something whose result *is* the chrome —
+    /// toggling the layout — so the confirmation survives long enough to be
+    /// read. See [`chrome::REVEAL_HOLD_MS`].
+    pub reveal_hold_until: u64,
+
     /// Monotonic milliseconds, supplied by the shell.
     ///
     /// The core never reads a clock itself, so toast ages and expiry stay
@@ -284,6 +291,7 @@ impl App {
             address_summoned: false,
             page_field_focused: false,
             hint_visible: true,
+            reveal_hold_until: 0,
             clock: 0,
             measured_footprint: None,
         }
@@ -384,6 +392,13 @@ impl App {
 
     /// Feed cursor motion in. Returns `true` when chrome visibility changed.
     pub fn on_cursor(&mut self, cursor: Option<(f64, f64)>, size: (f64, f64)) -> bool {
+        // Chrome the user just asked for outranks where the pointer happens to
+        // be. Without this, a click on the strip's LAYOUT button revealed the
+        // sidebar and the same gesture's next mouse move immediately retracted
+        // it, because the cursor was still at the top right.
+        if self.clock < self.reveal_hold_until {
+            return false;
+        }
         let changed = self.reveal.update(cursor, size, self.chrome.threshold);
         if changed && (self.reveal.top || self.reveal.side) {
             self.hint_visible = false;
@@ -447,6 +462,9 @@ impl App {
                 let horizontal = self.chrome.layout == chrome::TabLayout::Horizontal;
                 self.reveal.top = horizontal;
                 self.reveal.side = !horizontal;
+                // And hold it there: the pointer is almost never near the edge
+                // that owns the surface the tabs just moved to.
+                self.reveal_hold_until = self.clock + chrome::REVEAL_HOLD_MS;
                 self.hint_visible = false;
             }
             Action::TogglePin => self.chrome.pinned = !self.chrome.pinned,

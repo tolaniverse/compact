@@ -985,6 +985,29 @@ fn toggling_layout_reveals_what_it_rearranged() {
 }
 
 #[test]
+fn the_layout_toggle_survives_the_mouse_move_that_follows_it() {
+    // Clicking LAYOUT in the strip leaves the cursor at the top right — the
+    // far side of the window from the sidebar it just revealed. Before the
+    // hold, the next mouse move retracted that sidebar within a frame, the
+    // toggle read as a no-op, and clicking again put the layout back.
+    let mut app = App::new();
+    let size = (1480.0, 940.0);
+    app.chrome.layout = crate::chrome::TabLayout::Horizontal;
+
+    app.apply(Action::ToggleLayout);
+    assert!(app.visibility().sidebar);
+
+    // Where the cursor actually is after that click: top right.
+    app.on_cursor(Some((1380.0, 20.0)), size);
+    assert!(app.visibility().sidebar, "the confirmation is still on screen");
+
+    // And hover resumes once the hold is over.
+    app.clock += crate::chrome::REVEAL_HOLD_MS;
+    app.on_cursor(Some((1380.0, 500.0)), size);
+    assert!(!app.visibility().sidebar);
+}
+
+#[test]
 fn hovering_the_top_never_summons_a_strip_the_layout_does_not_have() {
     // The report was "hovering near the top switches me to horizontal tabs".
     // Whatever else is going on, reveal alone must never do it: the top edge
