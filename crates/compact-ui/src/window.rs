@@ -339,6 +339,9 @@ impl Inner {
     }
 
     fn dispatch(&mut self, action: Action) {
+        if std::env::var_os("COMPACT_TRACE").is_some() {
+            eprintln!("[action] {action:?}");
+        }
         let fx = self.app.apply(action);
         self.settle(fx);
     }
@@ -629,6 +632,14 @@ fn install_monitors(inner: &Rc<RefCell<Inner>>) {
         let (x, y) = point_of(&i, event);
         let size = i.size();
         let revealed = i.app.on_cursor(Some((x, y)), size);
+        if std::env::var_os("COMPACT_TRACE").is_some() {
+            let v = i.app.visibility();
+            eprintln!(
+                "[reveal] cursor=({x:.0},{y:.0}) size=({:.0},{:.0}) top={} side={} -> strip={} sidebar={} layout={:?}",
+                size.0, size.1, i.app.reveal.top, i.app.reveal.side, v.strip, v.sidebar,
+                i.app.chrome.layout
+            );
+        }
         // Hover is only meaningful over visible chrome; hit-testing hidden
         // chrome would tint rows nobody can see.
         let hit = i.chrome.hit(&i.app, x, y);

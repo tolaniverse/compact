@@ -972,7 +972,38 @@ fn toggling_layout_reveals_what_it_rearranged() {
     let mut app = App::new();
     assert!(!app.visibility().any());
     app.apply(Action::ToggleLayout);
-    assert!(app.visibility().any());
+    let vis = app.visibility();
+    assert!(vis.strip, "horizontal shows the strip");
+    // And leaves no latch behind for the edge the new layout does not use.
+    // A stale `side` here would have the sidebar reappear the moment the
+    // cursor grazed the left edge of a layout that has no sidebar.
+    assert!(!app.reveal.side);
+
+    app.apply(Action::ToggleLayout);
+    assert!(app.visibility().sidebar, "vertical shows the sidebar");
+    assert!(!app.reveal.top, "and no stale top latch behind it");
+}
+
+#[test]
+fn hovering_the_top_never_summons_a_strip_the_layout_does_not_have() {
+    // The report was "hovering near the top switches me to horizontal tabs".
+    // Whatever else is going on, reveal alone must never do it: the top edge
+    // answers for the strip, and the strip only exists in horizontal.
+    let mut app = App::new();
+    let size = (1480.0, 940.0);
+    for y in [900.0, 400.0, 200.0, 60.0, 4.0] {
+        app.on_cursor(Some((740.0, y)), size);
+        let vis = app.visibility();
+        assert!(!vis.strip, "no strip in vertical at y={y}");
+        assert!(!vis.sidebar, "and the top edge is not the sidebar's edge");
+        assert_eq!(app.chrome.layout, crate::chrome::TabLayout::Vertical);
+    }
+    // Same along the top-left corner, where both latches are live at once.
+    for x in [4.0, 60.0, 200.0, 400.0] {
+        app.on_cursor(Some((x, 30.0)), size);
+        assert!(!app.visibility().strip, "no strip in vertical at x={x}");
+        assert_eq!(app.chrome.layout, crate::chrome::TabLayout::Vertical);
+    }
 }
 
 #[test]

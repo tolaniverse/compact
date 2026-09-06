@@ -434,11 +434,19 @@ impl App {
             }
             Action::ToggleLayout => {
                 self.chrome.layout = self.chrome.layout.toggled();
-                // Show the result. Silently swapping hidden chrome gives no
-                // feedback that anything happened. These are hover latches, so
-                // they clear again on the next mouse move.
-                self.reveal.top = true;
-                self.reveal.side = true;
+                // Show the result: silently swapping hidden chrome gives no
+                // feedback that anything happened. Latch only the edge the new
+                // layout actually answers to, and clear the other.
+                //
+                // Setting both left a latch behind that the cursor never set —
+                // switch to vertical and `top` stayed true, so the strip was
+                // one ⌘E away from appearing over a layout that has no strip.
+                // The stale latch survives until the cursor crosses the retract
+                // threshold, which it may never do if the pointer is already
+                // parked near that edge.
+                let horizontal = self.chrome.layout == chrome::TabLayout::Horizontal;
+                self.reveal.top = horizontal;
+                self.reveal.side = !horizontal;
                 self.hint_visible = false;
             }
             Action::TogglePin => self.chrome.pinned = !self.chrome.pinned,
