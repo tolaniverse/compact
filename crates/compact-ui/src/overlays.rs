@@ -106,6 +106,13 @@ pub struct Overlays {
     palette_esc: Layer,
     pub palette_field: Retained<NSTextField>,
     palette_rows: Vec<Row>,
+    /// Index of the first rendered command.
+    ///
+    /// The palette is a fixed set of layers, not a scroll view, so a list
+    /// longer than the panel is shown through a window that follows the
+    /// selection. Kept here rather than in `App` because it is a property of
+    /// how much room this window has, which the core has no business knowing.
+    palette_first: usize,
 
     // Workspace switcher.
     pub switcher: Retained<NSView>,
@@ -324,6 +331,7 @@ impl Overlays {
             palette_esc,
             palette_field,
             palette_rows: Vec::new(),
+            palette_first: 0,
             switcher,
             switcher_root,
             switcher_label,
@@ -395,29 +403,34 @@ impl Overlays {
         let items = app.commands();
         let pw = (w * 0.86).min(metric::PALETTE_WIDTH);
         let header = 52.0;
-        // Sized to content. The canvas caps the list and scrolls it, but the
-        // command set is nine items and never filters longer, so a scroll view
-        // here would be machinery that can only ever be a no-op — and clamping
-        // without one just clips the last row.
-        let list_h = items.len() as f64 * metric::PALETTE_ROW_HEIGHT + 14.0;
+        let py = h * 0.12;
+        let visible = palette_visible(items.len(), h, py, header);
+        // Keep the selection inside the window, moving it by the minimum.
+        self.palette_first = self.palette_first.min(items.len().saturating_sub(visible));
+        if app.selection < self.palette_first {
+            self.palette_first = app.selection;
+        } else if app.selection >= self.palette_first + visible {
+            self.palette_first = app.selection + 1 - visible;
+        }
+        let first = self.palette_first;
+        let list_h = visible as f64 * metric::PALETTE_ROW_HEIGHT + 14.0;
         let ph = header + list_h;
         let px = (w - pw) / 2.0;
-        let py = h * 0.12;
         set_frame(&self.palette_panel, rect(px, py, pw, ph));
         set_frame(&self.palette_caret, rect(15.0, 19.0, 12.0, 15.0));
         set_frame(&self.palette_esc, rect(pw - 50.0, 20.0, 35.0, 13.0));
         self.palette_field
             .setFrame(rect(px + 37.0, h - py - header + 16.0, pw - 100.0, 20.0));
 
-        while self.palette_rows.len() < items.len() {
+        while self.palette_rows.len() < visible {
             let r = Row::new(&self.palette_panel);
             self.palette_rows.push(r);
         }
         for (i, row) in self.palette_rows.iter().enumerate() {
-            match items.get(i) {
+            match items.get(first + i).filter(|_| i < visible) {
                 None => set_hidden(&row.root, true),
                 Some(c) => {
-                    let on = i == app.selection;
+                    let on = first + i == app.selection;
                     let ry = header + 7.0 + i as f64 * metric::PALETTE_ROW_HEIGHT;
                     set_hidden(&row.root, false);
                     set_frame(
@@ -772,9 +785,27 @@ impl Overlays {
         if y < list_top {
             return None;
         }
-        let idx = ((y - list_top) / metric::PALETTE_ROW_HEIGHT) as usize;
+        let visible = palette_visible(items.len(), h, py, 52.0);
+        let row = ((y - list_top) / metric::PALETTE_ROW_HEIGHT) as usize;
+        if row >= visible {
+            return None;
+        }
+        let idx = self.palette_first + row;
         (idx < items.len()).then_some(idx)
     }
+}
+
+/// How many command rows fit, given the window.
+///
+/// The palette grew past a screenful when the error previews joined it, and it
+/// is a fixed set of layers rather than a scroll view — so the list is shown
+/// through a window that follows the selection instead of being clipped by the
+/// bottom of the screen.
+fn palette_visible(count: usize, h: f64, py: f64, header: f64) -> usize {
+    let room = (h - py * 2.0 - header - 14.0).max(metric::PALETTE_ROW_HEIGHT);
+    let by_room = (room / metric::PALETTE_ROW_HEIGHT).floor() as usize;
+    let by_design = (metric::PALETTE_MAX_LIST_HEIGHT / metric::PALETTE_ROW_HEIGHT) as usize;
+    count.min(by_room.min(by_design)).max(1)
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]

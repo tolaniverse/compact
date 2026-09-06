@@ -283,10 +283,19 @@ impl Inner {
     }
 
     /// Turn queued web-view events into app state.
+    ///
+    /// `COMPACT_TRACE=1` logs every message a page sends. A bridge into a web
+    /// view is the one part of this app you cannot observe from the outside —
+    /// a click either produces the right state or silently produces nothing —
+    /// so it is worth being able to see the wire.
     fn drain_engine_events(&mut self) {
+        let trace = std::env::var_os("COMPACT_TRACE").is_some();
         for event in compact_engine::drain_events() {
             match event {
                 EngineEvent::Message { view, body } => {
+                    if trace {
+                        eprintln!("[bridge] {body:?}");
+                    }
                     // Only the visible tab can be clicked, and honouring a
                     // message from any other view would let a background page
                     // drive the UI.
