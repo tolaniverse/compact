@@ -9,7 +9,7 @@
 use crate::bookmark::BookmarkId;
 use crate::chrome::TabLayout;
 use crate::page::ErrorKind;
-use crate::settings::Keymap;
+use crate::settings::{BindingId, Keymap};
 use crate::tab::TabId;
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -54,45 +54,49 @@ pub struct Command {
     pub icon: &'static str,
     pub label: String,
     /// Rendered shortcut hint, empty when the command has no binding.
-    pub hint: &'static str,
+    ///
+    /// Read from the live keymap, like the shortcuts overlay. A fixed string
+    /// here would keep advertising a default the user has since remapped.
+    pub hint: String,
     pub action: Action,
 }
 
 /// Build the palette contents. Two rows are stateful — the layout toggle and
 /// the pin toggle name the state they move *to*, not the state they are in.
-pub fn command_list(layout: TabLayout, pinned: bool, bookmarked: bool) -> Vec<Command> {
+pub fn command_list(keymap: &Keymap, layout: TabLayout, pinned: bool, bookmarked: bool) -> Vec<Command> {
+    let key = |b: BindingId| keymap.chord(b).label();
     vec![
-        Command { icon: "+", label: "New tab".into(), hint: "⌘T", action: Action::NewTab },
-        Command { icon: "×", label: "Close tab".into(), hint: "⌘W", action: Action::CloseActiveTab },
+        Command { icon: "+", label: "New tab".into(), hint: key(BindingId::NewTab), action: Action::NewTab },
+        Command { icon: "×", label: "Close tab".into(), hint: key(BindingId::CloseTab), action: Action::CloseActiveTab },
         Command {
             icon: "▤",
             label: match layout {
                 TabLayout::Vertical => "Switch to horizontal tabs".into(),
                 TabLayout::Horizontal => "Switch to vertical tabs".into(),
             },
-            hint: "⌘E",
+            hint: key(BindingId::Layout),
             action: Action::ToggleLayout,
         },
-        Command { icon: "◫", label: "Switch workspace".into(), hint: "⌘Space", action: Action::OpenSwitcher },
-        Command { icon: "◈", label: "Jump to latest notification".into(), hint: "⌘⇧J", action: Action::JumpLatestNotification },
-        Command { icon: "⌁", label: "Focus address bar".into(), hint: "⌘L", action: Action::FocusAddress },
+        Command { icon: "◫", label: "Switch workspace".into(), hint: key(BindingId::Switcher), action: Action::OpenSwitcher },
+        Command { icon: "◈", label: "Jump to latest notification".into(), hint: key(BindingId::Jump), action: Action::JumpLatestNotification },
+        Command { icon: "⌁", label: "Focus address bar".into(), hint: key(BindingId::Address), action: Action::FocusAddress },
         Command {
             icon: if bookmarked { "★" } else { "☆" },
             label: if bookmarked { "Remove bookmark".into() } else { "Bookmark this tab".into() },
-            hint: "⌘D",
+            hint: key(BindingId::Bookmark),
             action: Action::ToggleBookmark,
         },
         Command {
             icon: if pinned { "◉" } else { "○" },
             label: if pinned { "Unpin chrome".into() } else { "Pin chrome open".into() },
-            hint: "",
+            hint: String::new(),
             action: Action::TogglePin,
         },
-        Command { icon: "↻", label: "Reload page".into(), hint: "⌘R", action: Action::Retry },
-        Command { icon: "⌂", label: "New tab page".into(), hint: "", action: Action::GoHome },
-        Command { icon: "⚙", label: "Quick settings".into(), hint: "⌘,", action: Action::OpenSettings },
-        Command { icon: "☰", label: "All settings".into(), hint: "⌘⇧,", action: Action::OpenSettingsPage },
-        Command { icon: "⌨", label: "Keyboard shortcuts".into(), hint: "?", action: Action::OpenShortcuts },
+        Command { icon: "↻", label: "Reload page".into(), hint: key(BindingId::Reload), action: Action::Retry },
+        Command { icon: "⌂", label: "New tab page".into(), hint: String::new(), action: Action::GoHome },
+        Command { icon: "⚙", label: "Quick settings".into(), hint: key(BindingId::QuickSettings), action: Action::OpenSettings },
+        Command { icon: "☰", label: "All settings".into(), hint: key(BindingId::AllSettings), action: Action::OpenSettingsPage },
+        Command { icon: "⌨", label: "Keyboard shortcuts".into(), hint: key(BindingId::Shortcuts), action: Action::OpenShortcuts },
     ]
     .into_iter()
     // The error pages are previewable from the palette, exactly as the canvas
@@ -101,7 +105,7 @@ pub fn command_list(layout: TabLayout, pinned: bool, bookmarked: bool) -> Vec<Co
     .chain(ErrorKind::ALL.into_iter().map(|k| Command {
         icon: "⚠",
         label: format!("Preview error — {}", k.spec().name),
-        hint: "",
+        hint: String::new(),
         action: Action::ShowError(k),
     }))
     .collect()

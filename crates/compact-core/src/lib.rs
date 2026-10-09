@@ -325,9 +325,13 @@ impl App {
     pub fn boot(&mut self) -> Vec<Effect> {
         let active = self.workspaces.current().active;
         let mut fx = Vec::new();
-        if let Some(eff) = self.activation_effect(active) {
-            self.workspaces.set_state(active, TabState::Live);
-            fx.push(eff);
+        // Live before rendering: an internal page draws the memory readout
+        // from the live set, and drawn first it would claim ~0 MB.
+        let was = self.workspaces.current().active_tab().state;
+        self.workspaces.set_state(active, TabState::Live);
+        match self.activation_effect_for(active, was) {
+            Some(eff) => fx.push(eff),
+            None => self.workspaces.set_state(active, was),
         }
         self.reconcile_into(&mut fx);
         fx
@@ -357,7 +361,7 @@ impl App {
 
     pub fn commands(&self) -> Vec<Command> {
         command::filter(
-            command::command_list(self.chrome.layout, self.chrome.pinned, self.is_bookmarked()),
+            command::command_list(&self.settings.keymap, self.chrome.layout, self.chrome.pinned, self.is_bookmarked()),
             &self.query,
         )
     }
@@ -1001,12 +1005,18 @@ impl App {
     /// a back/forward list, not a document — has nothing useful to say about a
     /// page that was never fetched.
     fn activation_effect(&self, id: TabId) -> Option<Effect> {
+        let state = self.workspaces.locate(id)?.1.state;
+        self.activation_effect_for(id, state)
+    }
+
+    /// [`Self::activation_effect`], judged as if the tab were in `state`.
+    fn activation_effect_for(&self, id: TabId, state: TabState) -> Option<Effect> {
         let (_, t) = self.workspaces.locate(id)?;
         if t.kind.is_internal() {
             let tab = t.clone();
             return html::render(self, &tab).map(|m| Effect::RenderInternal(id, m));
         }
-        match t.state {
+        match state {
             TabState::Hibernated => Some(Effect::Restore(id)),
             TabState::Cold => Some(Effect::Load(id, t.url.clone())),
             TabState::Live => None,

@@ -304,7 +304,8 @@ fn resolves_the_documented_bindings() {
     assert_eq!(resolve(&km(), "K", cmd, false), Some(Action::OpenPalette), "case-insensitive");
     assert_eq!(resolve(&km(), "t", cmd, false), Some(Action::NewTab));
     assert_eq!(resolve(&km(), ",", cmd, false), Some(Action::OpenSettings));
-    assert_eq!(resolve(&km(), " ", cmd, false), Some(Action::OpenSwitcher));
+    let alt = Mods { alt: true, ..Default::default() };
+    assert_eq!(resolve(&km(), " ", alt, false), Some(Action::OpenSwitcher));
     assert_eq!(resolve(&km(), "2", cmd, false), Some(Action::SwitchWorkspace(1)));
     assert_eq!(resolve(&km(), "Escape", Mods::default(), false), Some(Action::Dismiss));
 }
@@ -1252,7 +1253,7 @@ fn default_bindings_render_the_way_the_design_writes_them() {
     assert_eq!(km.label(BindingId::Jump), "⌘⇧J");
     assert_eq!(km.label(BindingId::QuickSettings), "⌘,");
     assert_eq!(km.label(BindingId::AllSettings), "⌘⇧,");
-    assert_eq!(km.label(BindingId::Switcher), "⌘Space");
+    assert_eq!(km.label(BindingId::Switcher), "⌥Space");
     // `?` is a key in its own right, not shift-slash spelled out.
     assert_eq!(km.label(BindingId::Shortcuts), "?");
     assert_eq!(km.label(BindingId::Workspace), "⌘1–3");
@@ -1472,7 +1473,7 @@ fn a_restart_restores_what_the_user_left() {
     app.settings.set_notif_mode(1, NotifMode::Muted);
     app.settings
         .keymap
-        .rebind(BindingId::Switcher, Chord::new(false, false, true, "Space"));
+        .rebind(BindingId::Switcher, Chord::new(true, false, true, "s"));
     app.apply(Action::SwitchWorkspace(1));
     app.apply(Action::NewTab);
     app.navigate("rust-lang.org");
@@ -1626,4 +1627,35 @@ fn boot_loads_a_web_front_tab_by_url() {
     let fx = app.boot();
     assert!(fx.contains(&Effect::Load(active, url)));
     assert!(app.workspaces.current().active_tab().state.is_live());
+}
+
+#[test]
+fn the_palette_advertises_remapped_keys() {
+    let mut app = App::new();
+    let hint = |app: &App| {
+        app.commands().into_iter().find(|c| c.action == Action::OpenSwitcher).unwrap().hint
+    };
+    assert_eq!(hint(&app), "⌥Space", "not ⌘Space, which Spotlight owns");
+    app.settings.keymap.rebind(BindingId::Switcher, Chord::new(true, false, false, "o"));
+    assert_eq!(hint(&app), "⌘O");
+}
+
+#[test]
+fn the_switcher_default_is_not_a_key_macos_reserves() {
+    let app = App::new();
+    assert_eq!(
+        app.resolve_key(" ", Mods { cmd: false, shift: false, alt: true }, false),
+        Some(Action::OpenSwitcher)
+    );
+}
+
+#[test]
+fn boot_counts_the_front_tab_before_drawing_the_memory_readout() {
+    let mut app = App::fresh();
+    let fx = app.boot();
+    let html = fx
+        .iter()
+        .find_map(|e| match e { Effect::RenderInternal(_, m) => Some(m.clone()), _ => None })
+        .expect("the new tab page is drawn");
+    assert!(!html.contains("~0 MB"), "the front tab is already live when drawn");
 }

@@ -448,7 +448,7 @@ impl Overlays {
                         if on { fg::PRIMARY } else { Rgba::hex(0xB4B4BE) },
                     );
                     set_frame(&row.hint, rect(pw - 90.0, 12.0, 68.0, 13.0));
-                    set_text(&row.hint, c.hint);
+                    set_text(&row.hint, &c.hint);
                 }
             }
         }

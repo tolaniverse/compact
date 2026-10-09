@@ -16,7 +16,7 @@
 
 use std::env;
 use std::fs;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::process::{Command, ExitCode};
 
 const BUNDLE_ID: &str = "app.compact.Compact";
@@ -81,11 +81,14 @@ fn help() {
 // ---- helpers ---------------------------------------------------------------
 
 fn workspace_root() -> PathBuf {
-    // `xtask/` is always exactly one level below the root.
-    Path::new(env!("CARGO_MANIFEST_DIR"))
-        .parent()
-        .expect("xtask must live in the workspace")
-        .to_path_buf()
+    // `xtask/` is always exactly one level below the root. Read at run time:
+    // `cargo xtask` sets it for the process, and the compile-time copy goes
+    // stale when the checkout moves, because cargo does not rebuild xtask for
+    // a path change alone.
+    let manifest = env::var_os("CARGO_MANIFEST_DIR")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from(env!("CARGO_MANIFEST_DIR")));
+    manifest.parent().expect("xtask must live in the workspace").to_path_buf()
 }
 
 fn cargo() -> String {

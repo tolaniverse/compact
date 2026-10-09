@@ -310,7 +310,9 @@ impl BindingId {
             BindingId::Reload => c("r"),
             // Placeholder: never consulted, `⌘1–3` is matched by range.
             BindingId::Workspace => c("1"),
-            BindingId::Switcher => c("Space"),
+            // ⌥Space, not the canvas's ⌘Space: macOS gives ⌘Space to Spotlight
+            // and the keystroke never reaches the app.
+            BindingId::Switcher => Chord::new(false, false, true, "Space"),
             BindingId::Jump => Chord::new(true, true, false, "j"),
             BindingId::Layout => c("e"),
             BindingId::Bookmark => c("d"),
