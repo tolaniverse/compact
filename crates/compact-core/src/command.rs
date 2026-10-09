@@ -55,6 +55,8 @@ pub enum Action {
     CloseWorkspace(usize),
     /// Close an agent workspace and take back its agent's access.
     RevokeAgent(usize),
+    /// Comment on the page in front for its agent (⌘⇧R).
+    ToggleReview,
 }
 
 /// A palette row.
@@ -111,7 +113,13 @@ pub fn command_list(
             hint: String::new(),
             action: Action::RevokeAgent(ws),
         };
-        [control, close, revoke]
+        let review = Command {
+            icon: "✎",
+            label: "Review this page".into(),
+            hint: key(BindingId::Review),
+            action: Action::ToggleReview,
+        };
+        [review, control, close, revoke]
     });
     agent_rows.chain(vec![
         Command { icon: "+", label: "New tab".into(), hint: key(BindingId::NewTab), action: Action::NewTab },

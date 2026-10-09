@@ -23,6 +23,7 @@ pub mod notify;
 pub mod page;
 pub mod persist;
 pub mod policy;
+pub mod review;
 pub mod settings;
 pub mod tab;
 pub mod theme;
@@ -85,6 +86,8 @@ pub enum Effect {
     RenderInternal(TabId, String),
     /// Reload whatever the tab is already pointing at.
     Reload(TabId),
+    /// Show or hide the review overlay on this tab, with its pins.
+    SetReview(TabId, bool),
 }
 
 /// Floor for a freshly-started navigation, so the bar is visible immediately.
@@ -233,6 +236,10 @@ pub struct App {
     pub history: Vec<Visit>,
     /// Agents you allowed, and the project each may work in.
     pub approvals: Vec<agent::Approval>,
+    /// The tab showing the review overlay, if any.
+    pub review: Option<TabId>,
+    /// The last comment id handed out. Saved, so ids never repeat.
+    pub comment_seq: u64,
 
     /// Palette query and highlighted row.
     pub query: String,
@@ -303,6 +310,8 @@ impl App {
             settings: Settings::default(),
             history: Vec::new(),
             approvals: Vec::new(),
+            review: None,
+            comment_seq: 0,
             query: String::new(),
             selection: 0,
             address_draft: None,
@@ -612,6 +621,7 @@ impl App {
                 self.overlay = Overlay::None;
                 fx.extend(self.close_agent_workspace(i));
             }
+            Action::ToggleReview => fx.extend(self.toggle_review()),
             Action::RevokeAgent(i) => {
                 self.overlay = Overlay::None;
                 fx.extend(self.revoke_agent(i));

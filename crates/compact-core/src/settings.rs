@@ -211,10 +211,11 @@ pub enum BindingId {
     QuickSettings,
     AllSettings,
     Shortcuts,
+    Review,
 }
 
 impl BindingId {
-    pub const ALL: [BindingId; 13] = [
+    pub const ALL: [BindingId; 14] = [
         BindingId::Palette,
         BindingId::Address,
         BindingId::NewTab,
@@ -228,6 +229,7 @@ impl BindingId {
         BindingId::QuickSettings,
         BindingId::AllSettings,
         BindingId::Shortcuts,
+        BindingId::Review,
     ];
 
     pub const fn label(self) -> &'static str {
@@ -245,6 +247,7 @@ impl BindingId {
             BindingId::QuickSettings => "Quick settings",
             BindingId::AllSettings => "All settings",
             BindingId::Shortcuts => "Shortcuts",
+            BindingId::Review => "Review mode",
         }
     }
 
@@ -263,6 +266,7 @@ impl BindingId {
             BindingId::QuickSettings => "quick",
             BindingId::AllSettings => "deep",
             BindingId::Shortcuts => "keys",
+            BindingId::Review => "review",
         }
     }
 
@@ -287,6 +291,7 @@ impl BindingId {
             BindingId::QuickSettings => Some(Action::OpenSettings),
             BindingId::AllSettings => Some(Action::OpenSettingsPage),
             BindingId::Shortcuts => Some(Action::OpenShortcuts),
+            BindingId::Review => Some(Action::ToggleReview),
         }
     }
 
@@ -320,6 +325,7 @@ impl BindingId {
             BindingId::AllSettings => Chord::new(true, true, false, ","),
             // `?` is shift-slash, and that is exactly how it arrives.
             BindingId::Shortcuts => Chord::new(false, true, false, "/"),
+            BindingId::Review => Chord::new(true, true, false, "r"),
         }
     }
 }

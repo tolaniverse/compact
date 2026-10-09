@@ -27,6 +27,7 @@ use crate::chrome::{ChromeConfig, TabLayout};
 use crate::page::PageKind;
 use crate::settings::{BindingId, Chord, NotifMode, Settings, Startup};
 use crate::theme::Rgba;
+use crate::review::{Anchor, Comment, CommentId, CommentKind, CommentState, Remark};
 use crate::workspace::{AgentInfo, Control, WorkspaceSet};
 use crate::App;
 
@@ -72,7 +73,7 @@ pub struct SavedTab {
 }
 
 /// One workspace as it is written to disk.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct SavedSpace {
     pub name: String,
     /// Index into `tabs` of the tab that was in front.
@@ -123,6 +124,33 @@ pub fn encode(app: &App) -> String {
         );
         if let Some(a) = &w.agent {
             line(&mut out, &["agent", &a.client, &a.project]);
+            for c in &a.comments {
+                let n = &c.anchor;
+                line(
+                    &mut out,
+                    &[
+                        "comment",
+                        &c.id.0.to_string(),
+                        c.kind.slug(),
+                        c.state.slug(),
+                        flag(c.delivered),
+                        &c.body,
+                        &n.url,
+                        &n.selector,
+                        &n.text,
+                        &n.role,
+                        &n.data,
+                        &floats(&n.rect),
+                        &floats(&n.viewport),
+                        &floats(&n.scroll),
+                        &n.styles,
+                        n.crop.as_deref().unwrap_or(""),
+                    ],
+                );
+                for r in &c.replies {
+                    line(&mut out, &["remark", if r.from_agent { "agent" } else { "you" }, &r.body]);
+                }
+            }
         }
         for t in &w.tabs {
             let (kind, title, host, url) = saved_tab_fields(t);
@@ -216,6 +244,15 @@ fn mods_field(c: &Chord) -> String {
         .collect()
 }
 
+fn floats(v: &[f64]) -> String {
+    v.iter().map(f64::to_string).collect::<Vec<_>>().join(",")
+}
+
+fn parse_floats<const N: usize>(s: &str) -> Option<[f64; N]> {
+    let v: Vec<f64> = s.split(',').map(|p| p.parse().ok()).collect::<Option<_>>()?;
+    v.try_into().ok()
+}
+
 /// `f64`'s `Display` round-trips exactly, so the tint comes back bit-for-bit.
 fn rgba_field(c: Rgba) -> String {
     format!("{},{},{},{}", c.r, c.g, c.b, c.a)
@@ -244,6 +281,7 @@ pub fn decode(text: &str) -> Result<App, LoadError> {
     let mut modes: Vec<NotifMode> = Vec::new();
     let mut bookmarks = Bookmarks::default();
     let mut approvals: Vec<crate::agent::Approval> = Vec::new();
+    let mut comment_seq = 0u64;
     let mut binds: Vec<(BindingId, Chord)> = Vec::new();
 
     for (i, raw) in lines {
@@ -321,6 +359,7 @@ pub fn decode(text: &str) -> Result<App, LoadError> {
                     control: Control::Agent,
                     hosts: Vec::new(),
                     connected: false,
+                    comments: Vec::new(),
                 });
             }
             "tab" => {
@@ -342,6 +381,44 @@ pub fn decode(text: &str) -> Result<App, LoadError> {
                 need(4)?;
                 let tint = parse_rgba(&f[3]).ok_or_else(|| bad("unreadable bookmark tint"))?;
                 bookmarks.insert(f[1].clone(), f[2].clone(), tint);
+            }
+            "comment" => {
+                need(16)?;
+                let agent = spaces
+                    .last_mut()
+                    .and_then(|s| s.agent.as_mut())
+                    .ok_or_else(|| bad("comment outside an agent workspace"))?;
+                let id: u64 = f[1].parse().map_err(|_| bad("comment id is not a number"))?;
+                comment_seq = comment_seq.max(id);
+                agent.comments.push(Comment {
+                    id: CommentId(id),
+                    kind: CommentKind::from_slug(&f[2]).unwrap_or(CommentKind::Change),
+                    state: CommentState::from_slug(&f[3]).unwrap_or(CommentState::Open),
+                    delivered: f[4] == "1",
+                    body: f[5].clone(),
+                    anchor: Anchor {
+                        url: f[6].clone(),
+                        selector: f[7].clone(),
+                        text: f[8].clone(),
+                        role: f[9].clone(),
+                        data: f[10].clone(),
+                        rect: parse_floats(&f[11]).unwrap_or_default(),
+                        viewport: parse_floats(&f[12]).unwrap_or_default(),
+                        scroll: parse_floats(&f[13]).unwrap_or_default(),
+                        styles: f[14].clone(),
+                        crop: Some(f[15].clone()).filter(|c| !c.is_empty()),
+                    },
+                    replies: Vec::new(),
+                });
+            }
+            "remark" => {
+                need(3)?;
+                let c = spaces
+                    .last_mut()
+                    .and_then(|s| s.agent.as_mut())
+                    .and_then(|a| a.comments.last_mut())
+                    .ok_or_else(|| bad("remark before any comment"))?;
+                c.replies.push(Remark { from_agent: f[1] == "agent", body: f[2].clone() });
             }
             "approved" => {
                 need(3)?;
@@ -374,6 +451,7 @@ pub fn decode(text: &str) -> Result<App, LoadError> {
     app.settings = settings;
     app.bookmarks = bookmarks;
     app.approvals = approvals;
+    app.comment_seq = comment_seq;
     app.workspaces = WorkspaceSet::from_saved(&spaces, current);
     apply_startup(&mut app);
     Ok(app)

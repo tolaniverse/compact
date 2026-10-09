@@ -156,6 +156,22 @@ impl WebKitEngine {
                 true,
             );
             ucc.addUserScript(&script);
+            // The review overlay, dormant until switched on, and the handler
+            // it posts to. Both live in Compact's world only, so a page can
+            // neither drive the overlay nor post a comment of its own.
+            let review = WKUserScript::initWithSource_injectionTime_forMainFrameOnly_inContentWorld(
+                WKUserScript::alloc(mtm),
+                &NSString::from_str(crate::review::REVIEW_SCRIPT),
+                WKUserScriptInjectionTime::AtDocumentEnd,
+                true,
+                &self.world,
+            );
+            ucc.addUserScript(&review);
+            ucc.addScriptMessageHandler_contentWorld_name(
+                handler,
+                &self.world,
+                &NSString::from_str(crate::review::REVIEW_HANDLER),
+            );
         }
         self.agent_configs.insert(key.to_string(), config.clone());
         config
@@ -410,6 +426,34 @@ impl WebKitEngine {
                 }
             }
         });
+    }
+
+    /// Show or hide the review overlay on `id`, with `pins_json` as its pins.
+    /// A tab that is not live, or whose page has no overlay, is left alone:
+    /// the overlay asks to be switched on again when its page loads.
+    pub fn set_review(&self, id: TabId, on: bool, pins_json: &str) {
+        if let Some(v) = self.views.get(&id) {
+            self.eval_in_world(v, &crate::review::set_script(on, pins_json), |_| {});
+        }
+    }
+
+    /// A PNG of part of the viewport, in CSS pixels, clipped to it.
+    pub fn screenshot_rect(
+        &self,
+        id: TabId,
+        rect: (f64, f64, f64, f64),
+        done: impl FnOnce(std::result::Result<Vec<u8>, String>) + 'static,
+    ) {
+        let Some(view) = self.views.get(&id) else {
+            done(Err(format!("{id} is not live")));
+            return;
+        };
+        let b = view.bounds();
+        let s = format!("{},{},{},{}", rect.0, rect.1, rect.2, rect.3);
+        match inspect::parse_rect(&s, (b.size.width, b.size.height)) {
+            Some(r) => take_snapshot(self.mtm, view, Some(r), done),
+            None => done(Err("that area is off screen".into())),
+        }
     }
 
     /// Run `js` in Compact's own content world and hand back its string

@@ -1770,8 +1770,8 @@ fn the_palette_offers_agent_commands_only_in_an_agent_workspace() {
     assert!(!has(&app, "Take control from Claude Code"));
 
     app.apply(Action::SwitchWorkspace(a));
-    let first = &app.commands()[0];
-    assert_eq!(first.label, "Take control from Claude Code", "agent rows come first");
+    let first = &app.commands()[1];
+    assert_eq!(first.label, "Take control from Claude Code", "agent rows come first, after review");
     assert!(has(&app, "Close Claude Code's workspace"));
 
     app.apply(Action::TakeControl);
@@ -2041,4 +2041,147 @@ fn only_connected_agents_hold_a_working_tab() {
     app.apply(Action::SwitchWorkspace(ws));
     app.apply(Action::TakeControl);
     assert!(app.workspaces.agent_working_tabs().is_empty(), "not while you drive");
+}
+
+// ---- review mode -------------------------------------------------------------
+
+use crate::review::{page_key, Anchor, CommentId, CommentKind, CommentState};
+
+fn reviewing() -> (App, usize, TabId) {
+    let (mut app, ws) = agent_app();
+    let (tab, _) = app.agent_open(ws, "localhost:3000/pricing").unwrap();
+    app.apply(Action::SwitchWorkspace(ws));
+    (app, ws, tab)
+}
+
+fn anchor_on(url: &str) -> Anchor {
+    Anchor {
+        url: url.into(),
+        selector: "main > button.cta".into(),
+        text: "Start free trial".into(),
+        role: "button".into(),
+        rect: [24.0, 610.0, 342.0, 48.0],
+        viewport: [390.0, 844.0],
+        ..Anchor::default()
+    }
+}
+
+#[test]
+fn review_mode_is_for_agent_workspaces() {
+    let mut app = App::fresh();
+    assert!(app.apply(Action::ToggleReview).is_empty());
+    assert_eq!(app.review, None);
+    let (mut app, _, tab) = reviewing();
+    assert_eq!(app.apply(Action::ToggleReview), vec![Effect::SetReview(tab, true)]);
+    assert_eq!(app.review, Some(tab));
+    assert_eq!(app.apply(Action::ToggleReview), vec![Effect::SetReview(tab, false)], "the same key leaves");
+    assert_eq!(app.review, None);
+}
+
+#[test]
+fn review_mode_is_bound_to_cmd_shift_r_and_offered_in_the_palette() {
+    let (mut app, _, _) = reviewing();
+    let m = Mods { cmd: true, shift: true, alt: false };
+    assert_eq!(app.resolve_key("r", m, false), Some(Action::ToggleReview));
+    assert_eq!(app.commands()[0].label, "Review this page");
+    assert_eq!(app.commands()[0].hint, "⌘⇧R");
+    app.apply(Action::ToggleReview);
+    assert!(app.review.is_some());
+}
+
+#[test]
+fn comments_reach_the_agent_once() {
+    let (mut app, ws, tab) = reviewing();
+    let id = app.add_comment(tab, CommentKind::Change, "  Text is cut off on mobile ", anchor_on("http://localhost:3000/pricing")).unwrap();
+    assert_eq!(id.label(), "c1");
+    assert_eq!(CommentId::parse("c1"), Some(id));
+    assert!(app.has_undelivered(ws));
+    let got = app.take_undelivered(ws);
+    assert_eq!(got.len(), 1);
+    assert_eq!(got[0].body, "Text is cut off on mobile", "trimmed");
+    assert!(app.take_undelivered(ws).is_empty(), "handed over once");
+    assert!(app.add_comment(tab, CommentKind::Change, "   ", Anchor::default()).is_none(), "empty is not a comment");
+}
+
+#[test]
+fn comments_cannot_be_pinned_on_your_own_tabs() {
+    let (mut app, _, _) = reviewing();
+    let yours = app.workspaces.spaces[0].active;
+    assert!(app.add_comment(yours, CommentKind::Change, "hi", Anchor::default()).is_none());
+}
+
+#[test]
+fn pins_follow_the_page_not_the_tab() {
+    let (mut app, ws, tab) = reviewing();
+    app.add_comment(tab, CommentKind::Change, "a", anchor_on("http://localhost:3000/pricing#plans")).unwrap();
+    app.add_comment(tab, CommentKind::Add, "b", anchor_on("http://localhost:3000/about")).unwrap();
+    assert_eq!(app.pins_for(tab).len(), 1, "only this page's");
+    let (other, _) = app.agent_open(ws, "localhost:3000/pricing/").unwrap();
+    assert_eq!(app.pins_for(other).len(), 1, "a second tab on the same page shows them too");
+    assert_eq!(page_key("http://x/a/#b"), "http://x/a");
+}
+
+#[test]
+fn comments_survive_a_restart_with_their_anchors() {
+    let (mut app, ws, tab) = reviewing();
+    let mut a = anchor_on("http://localhost:3000/pricing");
+    a.data = "data-testid=cta".into();
+    a.styles = "font-size: 18px; overflow: hidden".into();
+    let id = app.add_comment(tab, CommentKind::Question, "Why\tthis\ncolour?", a.clone()).unwrap();
+    app.set_comment_crop(id, "c1.png");
+    app.take_undelivered(ws);
+    app.workspaces.spaces[ws].agent.as_mut().unwrap().comments[0]
+        .replies
+        .push(crate::review::Remark { from_agent: true, body: "Brand purple.".into() });
+
+    let back = persist::decode(&app.snapshot()).unwrap();
+    let c = &back.workspaces.spaces[ws].agent.as_ref().unwrap().comments[0];
+    assert_eq!(c.body, "Why\tthis\ncolour?");
+    assert_eq!(c.kind, CommentKind::Question);
+    assert!(c.delivered);
+    assert_eq!(c.anchor.crop.as_deref(), Some("c1.png"));
+    assert_eq!(c.anchor.rect, a.rect);
+    assert_eq!(c.anchor.data, a.data);
+    assert_eq!(c.replies[0].body, "Brand purple.");
+    assert_eq!(back.comment_seq, 1, "ids carry on from where they were");
+
+    let mut back = back;
+    let (t, _) = back.agent_open(ws, "localhost:3000/pricing").unwrap();
+    let next = back.add_comment(t, CommentKind::Change, "again", Anchor::default()).unwrap();
+    assert_eq!(next, CommentId(2));
+}
+
+#[test]
+fn resolved_comments_have_no_pins_and_are_trimmed_first() {
+    let (mut app, ws, tab) = reviewing();
+    let url = "http://localhost:3000/pricing";
+    let first = app.add_comment(tab, CommentKind::Change, "old", anchor_on(url)).unwrap();
+    app.workspaces.spaces[ws].agent.as_mut().unwrap().comments[0].state = CommentState::Resolved;
+    assert!(app.pins_for(tab).is_empty());
+    for i in 0..crate::review::MAX_COMMENTS {
+        app.add_comment(tab, CommentKind::Change, &format!("n{i}"), anchor_on(url)).unwrap();
+    }
+    let all = app.comments_in(ws, None);
+    assert_eq!(all.len(), crate::review::MAX_COMMENTS);
+    assert!(all.iter().all(|c| c.id != first), "the resolved one went first");
+}
+
+#[test]
+fn an_agent_asking_for_review_tells_you_and_readies_the_overlay() {
+    let (mut app, ws) = agent_app();
+    let (tab, _) = app.agent_open(ws, "localhost:3000").unwrap();
+    let fx = app.request_review(ws, tab, Some("New pricing cards"));
+    assert_eq!(fx, vec![Effect::SetReview(tab, true)]);
+    assert_eq!(app.review, Some(tab));
+    let toast = activity(&app);
+    assert_eq!(toast.last().unwrap().text, "New pricing cards");
+    assert!(app.request_review(0, tab, None).is_empty(), "not from your own workspace");
+}
+
+#[test]
+fn reading_comments_marks_them_seen() {
+    let (mut app, ws, tab) = reviewing();
+    app.add_comment(tab, CommentKind::Change, "x", Anchor::default()).unwrap();
+    app.mark_delivered(ws);
+    assert!(!app.has_undelivered(ws));
 }

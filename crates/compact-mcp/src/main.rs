@@ -183,6 +183,19 @@ impl Session {
 /// Turn the app's answer into MCP content: a screenshot becomes an image,
 /// anything else readable text.
 fn content(v: Value) -> Value {
+    // Comments carry their crops as a list: one image block each, in order,
+    // then the text that refers to them.
+    if let Some(images) = v.get("images").and_then(Value::as_array).filter(|a| !a.is_empty()) {
+        let mut blocks: Vec<Value> = images
+            .iter()
+            .filter_map(|i| i.get("png_base64").and_then(Value::as_str))
+            .map(|png| json!({"type": "image", "data": png, "mimeType": "image/png"}))
+            .collect();
+        let mut rest = v.clone();
+        rest.as_object_mut().map(|o| o.remove("images"));
+        blocks.push(json!({"type": "text", "text": serde_json::to_string_pretty(&rest).unwrap_or_default()}));
+        return Value::Array(blocks);
+    }
     if let Some(png) = v.get("png_base64").and_then(Value::as_str) {
         let mut rest = v.clone();
         rest.as_object_mut().map(|o| o.remove("png_base64"));
@@ -295,6 +308,10 @@ mod tests {
         assert_eq!(c[0]["type"], "image");
         assert_eq!(c[0]["data"], "AAAA");
         assert!(!c[1]["text"].as_str().unwrap().contains("AAAA"));
+        let c = content(json!({"images": [{"png_base64": "AA"}, {"png_base64": "BB"}], "comments": []}));
+        assert_eq!(c.as_array().unwrap().len(), 3);
+        assert_eq!(c[1]["data"], "BB");
+        assert!(!c[2]["text"].as_str().unwrap().contains("BB"));
         let t = content(json!({"text": "page: x"}));
         assert_eq!(t[0]["text"], "page: x");
     }

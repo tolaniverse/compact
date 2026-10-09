@@ -67,6 +67,12 @@ pub(super) struct AgentHost {
     prompts: VecDeque<Prompt>,
     showing: bool,
     waits: Vec<Wait>,
+    /// Agents blocked in `wait_for_feedback`.
+    feedback: Vec<FeedbackWait>,
+    /// Comments whose crop is still being taken. They are held back from
+    /// agents until it is saved, so a comment never arrives without the
+    /// picture of what it is about.
+    cropping: std::collections::HashSet<compact_core::review::CommentId>,
 }
 
 impl AgentHost {
@@ -81,6 +87,8 @@ impl AgentHost {
             prompts: VecDeque::new(),
             showing: false,
             waits: Vec::new(),
+            feedback: Vec::new(),
+            cropping: Default::default(),
         })
     }
 }
@@ -94,7 +102,7 @@ impl Inner {
     pub(super) fn service_agents(&mut self) {
         let Some(host) = self.agents.as_ref() else { return };
         let events = host.server.poll();
-        let had_work = !events.is_empty() || !host.waits.is_empty();
+        let had_work = !events.is_empty() || !host.waits.is_empty() || !host.feedback.is_empty();
         for ev in events {
             match ev {
                 Event::Request(conn, req) => self.agent_request(conn, req.id, req.op),
@@ -110,6 +118,7 @@ impl Inner {
                     }
                     let h = self.agents.as_mut().expect("checked above");
                     h.waits.retain(|w| w.conn != conn);
+                    h.feedback.retain(|w| w.conn != conn);
                     // A queued question for an agent that left is moot; the
                     // one on screen stays, since your answer still counts.
                     h.prompts.retain(|p| match p {
@@ -119,6 +128,7 @@ impl Inner {
             }
         }
         self.finish_waits();
+        self.finish_feedback();
         self.show_next_prompt();
         if had_work {
             self.render();
@@ -195,6 +205,9 @@ impl Inner {
             Ok(t) => t,
             Err(r) => return self.agent_reply(conn, id, r),
         };
+        if self.review_call((conn, id), &session, ws, tab, tool, &args) {
+            return;
+        }
         let wait = |then| Wait { conn, id, tab, since: 0, then };
 
         let outcome: Result<Option<Wait>, AgentError> = match tool {
@@ -494,6 +507,243 @@ impl Inner {
                     self.agent_reply(conn, id, err(format!("the user did not allow opening {host}")));
                 }
             }
+        }
+    }
+}
+
+// ---- review mode ---------------------------------------------------------------
+
+use compact_core::review::{Anchor, Comment, CommentKind, CommentState};
+
+/// Space kept around an element in its crop, in CSS pixels.
+const CROP_MARGIN: f64 = 24.0;
+
+/// Where comment crops are kept: `crops/` beside the state file.
+fn crops_dir() -> Option<std::path::PathBuf> {
+    compact_agent::paths::state_dir().map(|d| d.join("crops"))
+}
+
+/// A crop's file, if `name` is one Compact would have written. The name comes
+/// from the state file, so it is checked rather than joined blindly.
+fn crop_path(name: &str) -> Option<std::path::PathBuf> {
+    let ok = name.strip_prefix('c').and_then(|r| r.strip_suffix(".png")).is_some_and(|n| !n.is_empty() && n.bytes().all(|b| b.is_ascii_digit()));
+    ok.then(|| crops_dir().map(|d| d.join(name))).flatten()
+}
+
+/// The pins the overlay draws on `tab`, as the JSON its `set` takes.
+pub(super) fn pins_json(app: &compact_core::App, tab: TabId) -> String {
+    let pins: Vec<Value> = app
+        .pins_for(tab)
+        .iter()
+        .enumerate()
+        .map(|(i, c)| {
+            let a = &c.anchor;
+            json!({
+                "id": c.id.label(), "n": i + 1, "state": c.state.slug(), "kind": c.kind.slug(), "body": c.body,
+                "selector": a.selector, "text": a.text, "role": a.role,
+                "rect": a.rect, "viewport": a.viewport, "scroll": a.scroll,
+            })
+        })
+        .collect();
+    Value::Array(pins).to_string()
+}
+
+/// A comment as an agent reads it. `image` is its crop's position among the
+/// images sent with it, when it has one.
+fn comment_json(c: &Comment, image: Option<usize>) -> Value {
+    let a = &c.anchor;
+    let element = (!a.selector.is_empty()).then(|| {
+        json!({"selector": a.selector, "text": a.text, "role": a.role, "data": a.data, "styles": a.styles})
+    });
+    json!({
+        "id": c.id.label(),
+        "kind": c.kind.slug(),
+        "state": c.state.slug(),
+        "body": c.body,
+        "page": a.url,
+        "element": element,
+        "area": {"x": a.rect[0], "y": a.rect[1], "width": a.rect[2], "height": a.rect[3]},
+        "viewport": {"width": a.viewport[0], "height": a.viewport[1]},
+        "replies": c.replies.iter().map(|r| json!({"from": if r.from_agent { "agent" } else { "user" }, "body": r.body})).collect::<Vec<_>>(),
+        "screenshot": image.map(|i| format!("image {} above", i + 1)),
+    })
+}
+
+/// Comments with their crops attached, ready to send.
+fn comments_reply(comments: &[Comment], note: Option<&str>) -> Reply {
+    let mut images = Vec::new();
+    let list: Vec<Value> = comments
+        .iter()
+        .map(|c| {
+            let png = c.anchor.crop.as_deref().and_then(crop_path).and_then(|p| std::fs::read(p).ok());
+            let image = png.map(|bytes| {
+                images.push(json!({"png_base64": compact_agent::base64(&bytes)}));
+                images.len() - 1
+            });
+            comment_json(c, image)
+        })
+        .collect();
+    let mut v = json!({"comments": list, "images": images});
+    if let Some(n) = note {
+        v["note"] = json!(n);
+    }
+    Reply::Ok(v)
+}
+
+pub(super) struct FeedbackWait {
+    conn: ConnId,
+    id: u64,
+    session: Session,
+    until: u64,
+}
+
+impl Inner {
+    /// A message from the review overlay on one of the agent's pages.
+    pub(super) fn on_review_message(&mut self, view: usize, body: &str) {
+        let Some(tab) = self.engine.tab_of(view) else { return };
+        let Ok(v) = serde_json::from_str::<Value>(body) else { return };
+        let s = |k: &str| v.get(k).and_then(Value::as_str).unwrap_or("").to_string();
+        let floats = |k: &str| -> Vec<f64> {
+            v.get(k).and_then(Value::as_array).map(|a| a.iter().filter_map(Value::as_f64).collect()).unwrap_or_default()
+        };
+        match s("type").as_str() {
+            "ready" => {
+                if self.app.review == Some(tab) {
+                    self.engine.set_review(tab, true, &pins_json(&self.app, tab));
+                }
+            }
+            "exit" => {
+                let fx = self.app.end_review(tab);
+                self.settle(fx);
+            }
+            "comment" => {
+                let rect: [f64; 4] = floats("rect").try_into().unwrap_or_default();
+                let anchor = Anchor {
+                    url: s("url"),
+                    selector: s("selector"),
+                    text: s("text"),
+                    role: s("role"),
+                    data: s("data"),
+                    rect,
+                    viewport: floats("viewport").try_into().unwrap_or_default(),
+                    scroll: floats("scroll").try_into().unwrap_or_default(),
+                    styles: s("styles"),
+                    crop: None,
+                };
+                let kind = CommentKind::from_slug(&s("kind")).unwrap_or(CommentKind::Change);
+                let Some(id) = self.app.add_comment(tab, kind, &s("body"), anchor) else {
+                    // Not one we can keep; show the overlay again as it was.
+                    self.engine.set_review(tab, self.app.review == Some(tab), &pins_json(&self.app, tab));
+                    return;
+                };
+                self.render();
+                if let Some(h) = self.agents.as_mut() {
+                    h.cropping.insert(id);
+                }
+                let [x, y, w, h] = rect;
+                let area = (x - CROP_MARGIN, y - CROP_MARGIN, w + 2.0 * CROP_MARGIN, h + 2.0 * CROP_MARGIN);
+                let me = self.self_ref.clone();
+                self.engine.screenshot_rect(tab, area, move |shot| {
+                    // Never on the caller's stack: a tab that is not live
+                    // answers at once, while the shell is still borrowed.
+                    crate::widgets::queue_after(0.0, move || {
+                        let Some(inner) = me.upgrade() else { return };
+                        let mut i = inner.borrow_mut();
+                        if let Some(h) = i.agents.as_mut() {
+                            h.cropping.remove(&id);
+                        }
+                        if let (Ok(png), Some(dir)) = (shot, crops_dir()) {
+                            let name = format!("{}.png", id.label());
+                            if std::fs::create_dir_all(&dir).and_then(|_| std::fs::write(dir.join(&name), png)).is_ok() {
+                                i.app.set_comment_crop(id, &name);
+                            }
+                        }
+                        let on = i.app.review == Some(tab);
+                        let pins = pins_json(&i.app, tab);
+                        i.engine.set_review(tab, on, &pins);
+                        i.render();
+                    });
+                });
+            }
+            _ => {}
+        }
+    }
+
+    /// The review tools. Returns false for a tool that is not one of them.
+    fn review_call(&mut self, (conn, id): (ConnId, u64), session: &Session, ws: usize, tab: TabId, tool: &str, args: &Value) -> bool {
+        match tool {
+            tools::REQUEST_REVIEW => {
+                let fx = match self.app.agent_wake(ws, tab) {
+                    Ok(fx) => fx,
+                    Err(e) => {
+                        self.agent_reply(conn, id, err(e));
+                        return true;
+                    }
+                };
+                self.perform(fx);
+                let note = args.get("note").and_then(Value::as_str);
+                let fx = self.app.request_review(ws, tab, note);
+                self.settle(fx);
+                self.agent_reply(conn, id, Reply::Ok(json!({
+                    "tab": tab_ref(tab),
+                    "note": "The user was told; call wait_for_feedback for their comments.",
+                })));
+            }
+            tools::GET_COMMENTS => {
+                let state = match args.get("state").and_then(Value::as_str) {
+                    Some("all") => None,
+                    Some(s) => CommentState::from_slug(s).or(Some(CommentState::Open)),
+                    None => Some(CommentState::Open),
+                };
+                let comments: Vec<Comment> = self.app.comments_in(ws, state).into_iter().cloned().collect();
+                if state == Some(CommentState::Open) || state.is_none() {
+                    self.app.mark_delivered(ws);
+                }
+                self.agent_reply(conn, id, comments_reply(&comments, None));
+            }
+            tools::WAIT_FOR_FEEDBACK => {
+                let secs = args
+                    .get("timeout_seconds")
+                    .and_then(Value::as_u64)
+                    .unwrap_or(120)
+                    .clamp(1, tools::MAX_FEEDBACK_WAIT_SECS);
+                let cropping = self.agents.as_ref().is_some_and(|h| !h.cropping.is_empty());
+                if self.app.has_undelivered(ws) && !cropping {
+                    let got = self.app.take_undelivered(ws);
+                    self.agent_reply(conn, id, comments_reply(&got, None));
+                } else if let Some(h) = self.agents.as_mut() {
+                    h.feedback.push(FeedbackWait { conn, id, session: session.clone(), until: self.app.clock + secs * 1000 });
+                }
+            }
+            _ => return false,
+        }
+        true
+    }
+
+    /// Answer feedback waits that now have comments, or have run out.
+    fn finish_feedback(&mut self) {
+        let Some(h) = self.agents.as_mut() else { return };
+        if h.feedback.is_empty() {
+            return;
+        }
+        let cropping = !h.cropping.is_empty();
+        let waits = std::mem::take(&mut h.feedback);
+        let mut still = Vec::new();
+        for w in waits {
+            let ws = self.app.agent_workspace(&w.session.client, &w.session.project);
+            match ws {
+                Some(ws) if self.app.has_undelivered(ws) && !cropping => {
+                    let got = self.app.take_undelivered(ws);
+                    self.agent_reply(w.conn, w.id, comments_reply(&got, None));
+                }
+                _ if self.app.clock >= w.until => {
+                    self.agent_reply(w.conn, w.id, comments_reply(&[], Some("no new comments yet; call wait_for_feedback again to keep waiting")));
+                }
+                _ => still.push(w),
+            }
+        }
+        if let Some(h) = self.agents.as_mut() {
+            h.feedback.extend(still);
         }
     }
 }

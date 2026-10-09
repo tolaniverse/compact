@@ -14,6 +14,7 @@ use std::fmt;
 
 pub mod capture;
 pub mod inspect;
+pub mod review;
 
 #[cfg(target_os = "macos")]
 pub mod bridge;

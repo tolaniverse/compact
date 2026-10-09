@@ -48,6 +48,9 @@ pub enum EngineEvent {
     /// output, an error or a request. The page wrote it, so it is data about
     /// the page and nothing more. See [`crate::capture`].
     Capture { view: usize, line: String },
+    /// A message from the review overlay (see [`crate::review`]). Only
+    /// Compact's own content world can post these.
+    Review { view: usize, body: String },
     /// A navigation failed. `code` is the `NSError` code.
     Failed { view: usize, code: isize },
     /// The web content process backing this view died.
@@ -113,8 +116,16 @@ define_class!(
             // Two handlers share this object. Which one a message came in on
             // decides what it is allowed to mean: a capture line can only
             // ever be recorded, never acted on.
-            if unsafe { message.name() }.to_string() == crate::capture::CAPTURE_HANDLER {
+            let name = unsafe { message.name() }.to_string();
+            if name == crate::capture::CAPTURE_HANDLER {
                 push(EngineEvent::Capture { view, line: s.to_string() });
+            } else if name == crate::review::REVIEW_HANDLER {
+                // Registered in our world alone, but checked anyway: a
+                // comment is only ever something you typed into our overlay.
+                let world = unsafe { message.world().name() }.map(|n| n.to_string());
+                if world.as_deref() == Some(crate::inspect::WORLD) {
+                    push(EngineEvent::Review { view, body: s.to_string() });
+                }
             } else {
                 let frame = unsafe { message.frameInfo() };
                 let origin = if unsafe { frame.isMainFrame() } {

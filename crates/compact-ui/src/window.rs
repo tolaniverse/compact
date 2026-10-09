@@ -141,6 +141,10 @@ impl Inner {
                     let _ = self.engine.load_html(id, &html, &base);
                 }
                 Effect::Reload(id) => self.engine.reload(id),
+                Effect::SetReview(id, on) => {
+                    let pins = agents::pins_json(&self.app, id);
+                    self.engine.set_review(id, on, &pins);
+                }
                 // Deferred: the render that follows is what makes these
                 // visible, and focusing a hidden field does nothing.
                 Effect::FocusAddressField => self.pending_focus = Some(Focus::Address),
@@ -355,6 +359,7 @@ impl Inner {
                 }
                 // Recorded, never acted on: the page wrote it.
                 EngineEvent::Capture { view, line } => self.engine.ingest(view, &line),
+                EngineEvent::Review { view, body } => self.on_review_message(view, &body),
                 EngineEvent::Failed { view, code } => {
                     let Some(id) = self.engine.tab_of(view) else { continue };
                     // A failure reported against a tab already showing one of
@@ -621,8 +626,18 @@ fn install_monitors(inner: &Rc<RefCell<Inner>>) {
         // an internal page, which the shell only knows about because the page
         // says so.
         let in_address = i.chrome.address_editing();
-        let editing =
-            i.app.overlay == Overlay::Palette || in_address || i.app.page_field_focused;
+        // In review mode the page's overlay takes plain keys — Escape,
+        // Return, its comment box — so only chords reach the shell.
+        let reviewing = i.app.overlay == Overlay::None
+            && !in_address
+            && i.app.review == Some(i.app.workspaces.current().active);
+        if reviewing && chars_or_escape(&chars) == "Escape" {
+            return event as *const NSEvent as *mut NSEvent;
+        }
+        let editing = i.app.overlay == Overlay::Palette
+            || in_address
+            || i.app.page_field_focused
+            || reviewing;
 
         // Palette navigation.
         if i.app.overlay == Overlay::Palette {

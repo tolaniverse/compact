@@ -31,7 +31,7 @@ pub enum Control {
 }
 
 /// The agent behind an agent workspace.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct AgentInfo {
     /// The name the client introduced itself with: "Claude Code", "opencode".
     pub client: String,
@@ -45,6 +45,8 @@ pub struct AgentInfo {
     /// Whether the agent is connected right now. While it is, the tab it is
     /// working in is kept live like the one you are looking at. Not saved.
     pub connected: bool,
+    /// What you said about its pages in review mode.
+    pub comments: Vec<crate::review::Comment>,
 }
 
 impl AgentInfo {
@@ -470,6 +472,7 @@ impl WorkspaceSet {
                 control: Control::Agent,
                 hosts: Vec::new(),
                 connected: false,
+                comments: Vec::new(),
             }),
         });
         (n, true)
