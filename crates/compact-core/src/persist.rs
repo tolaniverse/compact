@@ -5,8 +5,8 @@
 //! is written. That keeps every rule about *what* is saved testable without a
 //! file system.
 //!
-//! **Saved:** workspaces and their tabs (title, host, URL, page kind), which tab
-//! and workspace were in front, bookmarks, the chrome configuration and the
+//! **Saved:** workspaces and their tabs (title, host, URL, page kind), which
+//! agent owns an agent workspace, which tab and workspace were in front, bookmarks, the chrome configuration and the
 //! settings page, keymap included.
 //!
 //! **Not saved, on purpose:** history (see [`crate::HISTORY_LIMIT`] — it is
@@ -26,11 +26,14 @@ use crate::chrome::{ChromeConfig, TabLayout};
 use crate::page::PageKind;
 use crate::settings::{BindingId, Chord, NotifMode, Settings, Startup};
 use crate::theme::Rgba;
-use crate::workspace::WorkspaceSet;
+use crate::workspace::{AgentInfo, Control, WorkspaceSet};
 use crate::App;
 
 /// Bumped when a change would make an older build misread the file.
-pub const FORMAT_VERSION: u32 = 1;
+///
+/// 2 added agent workspaces. A version-1 build would have skipped the `agent`
+/// record and read the workspace as one of yours, then saved it back that way.
+pub const FORMAT_VERSION: u32 = 2;
 
 const MAGIC: &str = "compact-state";
 
@@ -74,6 +77,8 @@ pub struct SavedSpace {
     /// Index into `tabs` of the tab that was in front.
     pub active: usize,
     pub tabs: Vec<SavedTab>,
+    /// Present for an agent workspace.
+    pub agent: Option<AgentInfo>,
 }
 
 // ---- encoding ----------------------------------------------------------------
@@ -115,6 +120,9 @@ pub fn encode(app: &App) -> String {
             &mut out,
             &["workspace", &w.name, s.notif_mode(i).slug(), &w.active_index().to_string()],
         );
+        if let Some(a) = &w.agent {
+            line(&mut out, &["agent", &a.client, &a.project]);
+        }
         for t in &w.tabs {
             let (kind, title, host, url) = saved_tab_fields(t);
             line(&mut out, &["tab", kind, title, host, url]);
@@ -294,6 +302,18 @@ pub fn decode(text: &str) -> Result<App, LoadError> {
                     name: f[1].clone(),
                     active: f[3].parse().map_err(|_| bad("active tab is not a number"))?,
                     tabs: Vec::new(),
+                    agent: None,
+                });
+            }
+            "agent" => {
+                need(3)?;
+                let space = spaces.last_mut().ok_or_else(|| bad("agent before any workspace"))?;
+                // Control is not saved: nobody is driving a workspace whose
+                // agent has not reconnected yet, and the agent asks again.
+                space.agent = Some(AgentInfo {
+                    client: f[1].clone(),
+                    project: f[2].clone(),
+                    control: Control::Agent,
                 });
             }
             "tab" => {
@@ -378,6 +398,10 @@ pub(crate) fn new_tab_entry() -> SavedTab {
 fn apply_startup(app: &mut App) {
     match app.settings.startup {
         Startup::NewTab => {
+            // The new tab is for you, so it never lands in an agent's workspace.
+            if app.workspaces.current().is_agent() {
+                app.workspaces.current = 0;
+            }
             app.workspaces.new_tab();
         }
         Startup::RestoreSession => {}

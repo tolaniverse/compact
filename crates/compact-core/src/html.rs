@@ -20,6 +20,7 @@ use crate::page::{ErrorKind, PageKind};
 use crate::settings::{NotifMode, Startup};
 use crate::tab::TabMeta;
 use crate::theme::{accent, bg, border, fg, fill, Rgba};
+use crate::workspace::Workspace;
 use crate::App;
 
 /// Escape text for an HTML text node or a quoted attribute.
@@ -54,6 +55,21 @@ fn js(s: &str) -> String {
 }
 
 /// First character of a label, for the square tint chips.
+/// A workspace's marker: its colour dot, or for an agent's workspace a robot
+/// in the same colour, so the two kinds are never confused at a glance.
+fn ws_mark(w: &Workspace, dot: f64) -> String {
+    let c = w.dot.css();
+    if w.is_agent() {
+        // Drawn larger than the dot: a robot shrunk to 6px is a smudge.
+        let size = dot * 2.0;
+        format!(
+            r#"<svg width="{size}" height="{size}" viewBox="0 0 12 12" style="flex:none" aria-label="Agent workspace"><path d="M6 .8v2.2" stroke="{c}" stroke-width="1.2" stroke-linecap="round"/><rect x="1.5" y="3" width="9" height="7.6" rx="2.2" fill="{c}"/><circle cx="4.4" cy="6.7" r="1.05" fill="rgba(0,0,0,.6)"/><circle cx="7.6" cy="6.7" r="1.05" fill="rgba(0,0,0,.6)"/></svg>"#
+        )
+    } else {
+        format!(r#"<span style="width:{dot}px;height:{dot}px;border-radius:50%;flex:none;background:{c}"></span>"#)
+    }
+}
+
 fn initial(s: &str) -> String {
     s.chars()
         .next()
@@ -264,13 +280,13 @@ onmouseover="this.style.transform='translateY(-2px)';this.style.borderColor='{hi
                 };
                 format!(
                     r#"<div class="row click" onclick="c('ws|{i}')" style="background:{bg}">
-<span style="width:6px;height:6px;border-radius:50%;flex:none;background:{dot}"></span>
+{mark}
 <span class="ell" style="font-size:12.5px;color:{fg}">{name}</span>
 <span class="mono" style="margin-left:auto;flex:none;font-size:9.5px;color:var(--fg4)">{count}</span>
 {badge}</div>"#,
                     i = i,
                     bg = if here { Rgba::white(0.05).css() } else { "transparent".into() },
-                    dot = w.dot.css(),
+                    mark = ws_mark(w, 6.0),
                     fg = if here { fg::PRIMARY.css() } else { fg::SECONDARY.css() },
                     name = escape(&w.name),
                     count = escape(&w.count_label()),
@@ -519,10 +535,10 @@ pub fn settings(app: &App, scroll: u32) -> String {
                 .collect();
             format!(
                 r#"<div style="display:flex;align-items:center;gap:14px;padding:12px 16px;border-bottom:1px solid var(--hair)">
-<span style="width:7px;height:7px;border-radius:50%;flex:none;background:{dot}"></span>
+{mark}
 <span style="font-size:12.5px;color:var(--fg2)">{name}</span>
 <div style="margin-left:auto;display:flex;gap:4px;padding:3px;border-radius:8px;background:{track};border:1px solid {line}">{modes}</div></div>"#,
-                dot = w.dot.css(),
+                mark = ws_mark(w, 7.0),
                 name = escape(&w.name),
                 track = Rgba::white(0.035).css(),
                 line = Rgba::white(0.05).css(),

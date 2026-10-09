@@ -1659,3 +1659,207 @@ fn boot_counts_the_front_tab_before_drawing_the_memory_readout() {
         .expect("the new tab page is drawn");
     assert!(!html.contains("~0 MB"), "the front tab is already live when drawn");
 }
+
+// ---- agent workspaces ------------------------------------------------------
+
+use crate::policy::plan_eviction_with;
+use crate::workspace::{agent_workspace_name, Control};
+
+#[test]
+fn an_agent_workspace_is_named_after_its_agent() {
+    assert_eq!(agent_workspace_name("Claude Code"), "Claude Code's workspace");
+    assert_eq!(agent_workspace_name("opencode"), "opencode's workspace");
+    assert_eq!(agent_workspace_name("Muse"), "Muse's workspace");
+    assert_eq!(agent_workspace_name("Atlas"), "Atlas' workspace");
+    assert_eq!(agent_workspace_name("  "), "Agent's workspace");
+}
+
+#[test]
+fn agents_get_workspaces_after_yours_and_get_them_back_on_reconnect() {
+    let mut app = App::fresh();
+    let i = app.open_agent_workspace("Claude Code", "~/proj/site");
+    assert_eq!(i, 3, "after Personal, Work and Research");
+    let ws = &app.workspaces.spaces[i];
+    assert!(ws.is_agent());
+    assert_eq!(ws.name, "Claude Code's workspace");
+    assert_eq!(ws.tabs.len(), 1);
+    assert_eq!(app.workspaces.current, 0, "opening one does not take you there");
+
+    let toast = activity(&app);
+    assert_eq!(toast.len(), 1, "a new agent workspace announces itself");
+    assert_eq!(toast[0].workspace, i);
+    assert_eq!(toast[0].source, "Claude Code");
+
+    assert_eq!(app.open_agent_workspace("Claude Code", "~/proj/site"), i, "same agent, same project");
+    assert_eq!(activity(&app).len(), 1, "a reconnect is not news");
+    assert_eq!(app.open_agent_workspace("Claude Code", "~/proj/other"), 4, "another project is another workspace");
+    assert_eq!(app.open_agent_workspace("opencode", "~/proj/site"), 5, "another agent is another workspace");
+}
+
+#[test]
+fn closing_an_agent_workspace_destroys_its_tabs_and_renumbers_what_came_after() {
+    let mut app = App::fresh();
+    let a = app.open_agent_workspace("Claude Code", "~/a");
+    let b = app.open_agent_workspace("Muse", "~/b");
+    let a_tab = app.workspaces.spaces[a].active;
+    let b_tab = app.workspaces.spaces[b].active;
+    app.settings.set_notif_mode(b, crate::settings::NotifMode::Muted);
+
+    let fx = app.apply(Action::CloseWorkspace(a));
+    assert!(fx.contains(&Effect::Destroy(a_tab)));
+    assert_eq!(app.workspaces.spaces.len(), 4);
+    assert_eq!(app.workspaces.spaces[3].name, "Muse's workspace", "Muse moved down one");
+    assert_eq!(app.workspaces.spaces[3].active, b_tab);
+    assert_eq!(
+        app.settings.notif_mode(3),
+        crate::settings::NotifMode::Muted,
+        "its notification setting moved with it"
+    );
+    assert!(
+        activity(&app).iter().all(|n| n.workspace == 3),
+        "the closed workspace's toast is gone and Muse's points at its new index"
+    );
+}
+
+#[test]
+fn your_own_workspaces_cannot_be_closed() {
+    let mut app = App::fresh();
+    assert!(app.apply(Action::CloseWorkspace(1)).is_empty());
+    assert_eq!(app.workspaces.spaces.len(), 3);
+}
+
+#[test]
+fn closing_the_agent_workspace_you_are_in_takes_you_home() {
+    let mut app = App::fresh();
+    let a = app.open_agent_workspace("Claude Code", "~/a");
+    app.apply(Action::SwitchWorkspace(a));
+    assert_eq!(app.workspaces.current, a);
+    let fx = app.apply(Action::CloseWorkspace(a));
+    assert_eq!(app.workspaces.current, 0);
+    assert!(fx.contains(&Effect::SlideWorkspace(-1)));
+}
+
+#[test]
+fn taking_control_pauses_the_agent_until_you_hand_back() {
+    let mut app = App::fresh();
+    let a = app.open_agent_workspace("Claude Code", "~/a");
+    assert!(app.agent_may_act(a));
+    assert!(!app.agent_may_act(0), "your workspaces have no agent");
+
+    app.apply(Action::SwitchWorkspace(a));
+    app.apply(Action::TakeControl);
+    assert!(!app.agent_may_act(a));
+    assert_eq!(app.workspaces.spaces[a].agent.as_ref().unwrap().control, Control::User);
+    assert!(!app.take_control(), "already yours");
+
+    app.apply(Action::HandBack);
+    assert!(app.agent_may_act(a));
+
+    app.apply(Action::SwitchWorkspace(0));
+    assert!(!app.take_control(), "nothing to take in your own workspace");
+}
+
+#[test]
+fn the_palette_offers_agent_commands_only_in_an_agent_workspace() {
+    let mut app = App::fresh();
+    let has = |app: &App, label: &str| app.commands().iter().any(|c| c.label == label);
+    let a = app.open_agent_workspace("Claude Code", "~/a");
+    assert!(!has(&app, "Take control from Claude Code"));
+
+    app.apply(Action::SwitchWorkspace(a));
+    let first = &app.commands()[0];
+    assert_eq!(first.label, "Take control from Claude Code", "agent rows come first");
+    assert!(has(&app, "Close Claude Code's workspace"));
+
+    app.apply(Action::TakeControl);
+    assert!(has(&app, "Hand back to Claude Code"));
+    assert!(!has(&app, "Take control from Claude Code"));
+}
+
+#[test]
+fn agent_tabs_are_evicted_before_yours() {
+    // Ids 1–2 are yours and coldest; 3–4 are the agent's and warmer.
+    let tabs = live_tabs(&[100, 100, 100, 100, 100]);
+    let agent = [TabId(3), TabId(4)];
+    let plan = plan_eviction_with(&tabs, TabId(5), &budget(300, 8, 1), Pressure::Normal, &agent);
+    assert_eq!(plan.hibernate, vec![TabId(3), TabId(4)]);
+}
+
+#[test]
+fn agents_are_held_to_their_own_slice_even_under_budget() {
+    // Plenty of bytes, but max_live 6 gives agents a slice of 2.
+    let tabs = live_tabs(&[50, 50, 50, 50, 50, 50]);
+    let agent = [TabId(2), TabId(3), TabId(4), TabId(5)];
+    let b = budget(4000, 6, 1);
+    assert_eq!(b.agent_live(), 2);
+    let plan = plan_eviction_with(&tabs, TabId(6), &b, Pressure::Normal, &agent);
+    assert_eq!(plan.hibernate, vec![TabId(2), TabId(3)], "coldest agent tabs over the slice");
+}
+
+#[test]
+fn the_active_tab_survives_even_in_an_agent_workspace() {
+    let tabs = live_tabs(&[100, 100, 100]);
+    let agent = [TabId(1), TabId(2), TabId(3)];
+    let plan = plan_eviction_with(&tabs, TabId(1), &budget(100, 8, 1), Pressure::Normal, &agent);
+    assert!(!plan.hibernate.contains(&TabId(1)));
+}
+
+#[test]
+fn agent_workspaces_are_not_prewarmed() {
+    let mut app = App::fresh();
+    let a = app.open_agent_workspace("Claude Code", "~/a");
+    let tab = app.workspaces.spaces[a].active;
+    app.workspaces.set_page(tab, crate::page::PageKind::Web, None);
+    app.workspaces.set_location(tab, "Site", "localhost:3000", "http://localhost:3000");
+    let fx = app.reconcile();
+    assert!(
+        !fx.iter().any(|e| matches!(e, Effect::Load(id, _) if *id == tab)),
+        "its tab waits for the agent to ask"
+    );
+}
+
+#[test]
+fn agent_workspaces_survive_a_restart() {
+    let mut app = App::fresh();
+    app.settings.startup = crate::settings::Startup::RestoreSession;
+    let a = app.open_agent_workspace("Claude Code", "~/proj\tsite");
+    app.workspaces.spaces[a].agent.as_mut().unwrap().control = Control::User;
+    let text = app.snapshot();
+    assert!(text.starts_with(&format!("compact-state\t{FORMAT_VERSION}\n")));
+
+    let back = persist::decode(&text).unwrap();
+    let ws = &back.workspaces.spaces[a];
+    assert_eq!(ws.name, "Claude Code's workspace");
+    let agent = ws.agent.as_ref().expect("still an agent's");
+    assert_eq!(agent.project, "~/proj\tsite", "escaped and unescaped");
+    assert_eq!(agent.control, Control::Agent, "control is not saved");
+    assert!(!back.workspaces.spaces[0].is_agent());
+}
+
+#[test]
+fn a_version_one_file_still_opens() {
+    let v1 = "compact-state\t1\ncurrent\t0\nworkspace\tPersonal\tall\t0\ntab\tweb\tA\ta.test\thttps://a.test\n";
+    let app = persist::decode(v1).unwrap();
+    assert_eq!(app.workspaces.spaces.len(), 1);
+    assert!(!app.workspaces.spaces[0].is_agent());
+}
+
+#[test]
+fn a_new_tab_at_startup_never_lands_in_an_agent_workspace() {
+    let mut app = App::fresh();
+    let a = app.open_agent_workspace("Claude Code", "~/a");
+    app.apply(Action::SwitchWorkspace(a));
+    app.settings.startup = crate::settings::Startup::NewTab;
+    let back = persist::decode(&app.snapshot()).unwrap();
+    assert_eq!(back.workspaces.current, 0);
+    assert_eq!(back.workspaces.spaces[a].tabs.len(), 1, "the agent's workspace is untouched");
+}
+
+#[test]
+fn internal_pages_draw_a_robot_for_agent_workspaces() {
+    let mut app = App::fresh();
+    app.open_agent_workspace("Claude Code", "~/a");
+    let page = crate::html::new_tab(&app, 0);
+    assert!(page.contains("Claude Code&#39;s workspace") || page.contains("Claude Code's workspace"));
+    assert_eq!(page.matches(r#"aria-label="Agent workspace""#).count(), 1);
+}

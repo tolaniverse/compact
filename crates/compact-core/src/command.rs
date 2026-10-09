@@ -11,6 +11,7 @@ use crate::chrome::TabLayout;
 use crate::page::ErrorKind;
 use crate::settings::{BindingId, Keymap};
 use crate::tab::TabId;
+use crate::workspace::{AgentInfo, Control};
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Action {
@@ -46,6 +47,12 @@ pub enum Action {
     ShowError(ErrorKind),
     /// ESC / scrim click: close whatever overlay is on top.
     Dismiss,
+    /// Stop the agent acting in the current agent workspace; you drive.
+    TakeControl,
+    /// Let the current workspace's agent act again.
+    HandBack,
+    /// Close an agent workspace and its tabs. Ignored for your own.
+    CloseWorkspace(usize),
 }
 
 /// A palette row.
@@ -63,9 +70,42 @@ pub struct Command {
 
 /// Build the palette contents. Two rows are stateful — the layout toggle and
 /// the pin toggle name the state they move *to*, not the state they are in.
-pub fn command_list(keymap: &Keymap, layout: TabLayout, pinned: bool, bookmarked: bool) -> Vec<Command> {
+///
+/// `agent` is the current workspace's agent, if it has one: its rows come
+/// first, because in an agent's workspace they are what you are most likely
+/// looking for.
+pub fn command_list(
+    keymap: &Keymap,
+    layout: TabLayout,
+    pinned: bool,
+    bookmarked: bool,
+    agent: Option<(usize, &AgentInfo)>,
+) -> Vec<Command> {
     let key = |b: BindingId| keymap.chord(b).label();
-    vec![
+    let agent_rows = agent.into_iter().flat_map(|(ws, a)| {
+        let control = match a.control {
+            Control::Agent => Command {
+                icon: "✋",
+                label: format!("Take control from {}", a.client),
+                hint: String::new(),
+                action: Action::TakeControl,
+            },
+            Control::User => Command {
+                icon: "↩",
+                label: format!("Hand back to {}", a.client),
+                hint: String::new(),
+                action: Action::HandBack,
+            },
+        };
+        let close = Command {
+            icon: "×",
+            label: format!("Close {}", crate::workspace::agent_workspace_name(&a.client)),
+            hint: String::new(),
+            action: Action::CloseWorkspace(ws),
+        };
+        [control, close]
+    });
+    agent_rows.chain(vec![
         Command { icon: "+", label: "New tab".into(), hint: key(BindingId::NewTab), action: Action::NewTab },
         Command { icon: "×", label: "Close tab".into(), hint: key(BindingId::CloseTab), action: Action::CloseActiveTab },
         Command {
@@ -97,8 +137,7 @@ pub fn command_list(keymap: &Keymap, layout: TabLayout, pinned: bool, bookmarked
         Command { icon: "⚙", label: "Quick settings".into(), hint: key(BindingId::QuickSettings), action: Action::OpenSettings },
         Command { icon: "☰", label: "All settings".into(), hint: key(BindingId::AllSettings), action: Action::OpenSettingsPage },
         Command { icon: "⌨", label: "Keyboard shortcuts".into(), hint: key(BindingId::Shortcuts), action: Action::OpenShortcuts },
-    ]
-    .into_iter()
+    ])
     // The error pages are previewable from the palette, exactly as the canvas
     // has them. They are the one part of the product you cannot otherwise see
     // on demand, because seeing them for real requires something to go wrong.

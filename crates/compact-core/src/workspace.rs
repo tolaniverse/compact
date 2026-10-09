@@ -17,6 +17,39 @@ pub struct Workspace {
     pub tabs: Vec<TabMeta>,
     pub active: TabId,
     pub unread: u32,
+    /// Set when an outside agent owns this workspace. Drawn with a robot in
+    /// place of the colour dot, so it is never mistaken for one of yours.
+    pub agent: Option<AgentInfo>,
+}
+
+/// Who is driving an agent workspace's tabs right now.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Control {
+    Agent,
+    /// You took over. The agent's actions wait until you hand back.
+    User,
+}
+
+/// The agent behind an agent workspace.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct AgentInfo {
+    /// The name the client introduced itself with: "Claude Code", "opencode".
+    pub client: String,
+    /// The directory the agent works in. With `client`, this is what a
+    /// reconnecting agent is matched on, so it gets its own tabs back.
+    pub project: String,
+    pub control: Control,
+}
+
+/// `"Claude Code's workspace"` — an agent workspace is named after its agent.
+pub fn agent_workspace_name(client: &str) -> String {
+    let client = client.trim();
+    let client = if client.is_empty() { "Agent" } else { client };
+    if client.ends_with('s') || client.ends_with('S') {
+        format!("{client}' workspace")
+    } else {
+        format!("{client}'s workspace")
+    }
 }
 
 impl Workspace {
@@ -27,6 +60,10 @@ impl Workspace {
     pub fn active_tab(&self) -> &TabMeta {
         let i = self.active_index();
         &self.tabs[i]
+    }
+
+    pub fn is_agent(&self) -> bool {
+        self.agent.is_some()
     }
 
     pub fn tab(&self, id: TabId) -> Option<&TabMeta> {
@@ -115,6 +152,7 @@ impl WorkspaceSet {
                     active: tabs[active_seed[wi].min(tabs.len() - 1)].id,
                     tabs,
                     unread: 0,
+                    agent: None,
                 }
             })
             .collect();
@@ -133,6 +171,7 @@ impl WorkspaceSet {
                 name: name.to_string(),
                 active: 0,
                 tabs: vec![crate::persist::new_tab_entry()],
+                agent: None,
             })
             .collect();
         Self::from_saved(&spaces, 0)
@@ -178,6 +217,7 @@ impl WorkspaceSet {
                     active: tabs[active_idx].id,
                     tabs,
                     unread: 0,
+                    agent: s.agent.clone(),
                 }
             })
             .collect();
@@ -345,6 +385,66 @@ impl WorkspaceSet {
         if let Some(w) = self.spaces.get_mut(ws) {
             w.unread += 1;
         }
+    }
+
+    /// Find the workspace `client` uses for `project`, or open one for it.
+    ///
+    /// Agent workspaces always sit after yours, so `⌘1–3` keep meaning what
+    /// they meant. Returns the workspace's index and whether it is new.
+    pub fn open_agent(&mut self, client: &str, project: &str) -> (usize, bool) {
+        let existing = self.spaces.iter().position(|w| {
+            w.agent
+                .as_ref()
+                .is_some_and(|a| a.client == client && a.project == project)
+        });
+        if let Some(i) = existing {
+            return (i, false);
+        }
+        let id = self.ids.next();
+        self.clock += 1;
+        let mut tab = TabMeta::internal(id, PageKind::NewTab);
+        tab.last_active = self.clock;
+        let n = self.spaces.len();
+        self.spaces.push(Workspace {
+            name: agent_workspace_name(client),
+            dot: WORKSPACE_DOTS[n % WORKSPACE_DOTS.len()],
+            active: id,
+            tabs: vec![tab],
+            unread: 0,
+            agent: Some(AgentInfo {
+                client: client.to_string(),
+                project: project.to_string(),
+                control: Control::Agent,
+            }),
+        });
+        (n, true)
+    }
+
+    /// Remove an agent workspace, returning the tabs that went with it.
+    ///
+    /// Your own workspaces cannot be removed this way: the keyboard, the
+    /// switcher and the settings page are all built around them existing.
+    pub fn close_agent(&mut self, index: usize) -> Option<Vec<TabId>> {
+        if !self.spaces.get(index)?.is_agent() {
+            return None;
+        }
+        let gone = self.spaces.remove(index);
+        if self.current == index {
+            self.current = 0;
+        } else if self.current > index {
+            self.current -= 1;
+        }
+        Some(gone.tabs.iter().map(|t| t.id).collect())
+    }
+
+    /// Every tab that belongs to an agent workspace — what the policy ranks
+    /// below yours.
+    pub fn agent_tabs(&self) -> Vec<TabId> {
+        self.spaces
+            .iter()
+            .filter(|w| w.is_agent())
+            .flat_map(|w| w.tabs.iter().map(|t| t.id))
+            .collect()
     }
 
     /// Workspaces other than the current one that have unread activity — the

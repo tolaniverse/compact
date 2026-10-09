@@ -536,3 +536,80 @@ pub fn queue_after(delay: f64, f: impl FnOnce() + 'static) {
     }
     std::mem::forget(block);
 }
+
+/// The agent-workspace marker: a robot head in the workspace's colour.
+///
+/// It stands where a workspace's colour dot would, so an agent's workspace is
+/// told apart from yours at a glance. Built from plain layers like everything
+/// else in the chrome, and drawn top-down, so its parent must be flipped.
+pub struct Robot {
+    root: Layer,
+    antenna: Layer,
+    head: Layer,
+    eyes: [Layer; 2],
+}
+
+impl Robot {
+    pub fn new(parent: &Layer) -> Self {
+        let zero = rect(0.0, 0.0, 0.0, 0.0);
+        let eye = Rgba::new(0.0, 0.0, 0.0, 0.6);
+        let r = Self {
+            root: layer(),
+            antenna: panel(zero, Rgba::white(0.0), 0.0, None),
+            head: panel(zero, Rgba::white(0.0), 0.0, None),
+            eyes: [panel(zero, eye, 0.0, None), panel(zero, eye, 0.0, None)],
+        };
+        for l in [&r.antenna, &r.head] {
+            add_sublayer(&r.root, l);
+        }
+        for e in &r.eyes {
+            add_sublayer(&r.head, e);
+        }
+        set_hidden(&r.root, true);
+        add_sublayer(parent, &r.root);
+        r
+    }
+
+    /// Draw it `size` points square with its top-left corner at `(x, y)`.
+    pub fn place(&self, x: f64, y: f64, size: f64, color: Rgba) {
+        // Laid out on a 12-unit grid, matching the internal pages' SVG.
+        let u = size / 12.0;
+        let round = |l: &Layer, r: f64| unsafe {
+            let _: () = msg_send![&**l, setCornerRadius: r];
+        };
+        set_frame(&self.root, rect(x, y, size, size));
+        set_frame(&self.antenna, rect(5.4 * u, 0.6 * u, 1.2 * u, 2.8 * u));
+        round(&self.antenna, 0.6 * u);
+        set_fill(&self.antenna, color);
+        set_frame(&self.head, rect(1.5 * u, 3.0 * u, 9.0 * u, 7.6 * u));
+        round(&self.head, 2.2 * u);
+        set_fill(&self.head, color);
+        // Eye centres, in the head's own coordinates.
+        for (e, cx) in self.eyes.iter().zip([2.9, 6.1]) {
+            set_frame(e, rect((cx - 1.05) * u, (3.7 - 1.05) * u, 2.1 * u, 2.1 * u));
+            round(e, 1.05 * u);
+        }
+    }
+
+    pub fn set_hidden(&self, v: bool) {
+        set_hidden(&self.root, v);
+    }
+}
+
+/// Show a workspace's marker: `dot` for yours, `robot` for an agent's.
+///
+/// `dot_frame` is where the dot goes; the robot is centred on the same point
+/// at `robot_size`, larger, because a robot shrunk to a dot's size is a smudge.
+pub fn show_marker(dot: &Layer, robot: &Robot, ws: &compact_core::workspace::Workspace, dot_frame: CGRect, robot_size: f64) {
+    let agent = ws.is_agent();
+    set_hidden(dot, agent);
+    robot.set_hidden(!agent);
+    if agent {
+        let cx = dot_frame.origin.x + dot_frame.size.width / 2.0;
+        let cy = dot_frame.origin.y + dot_frame.size.height / 2.0;
+        robot.place(cx - robot_size / 2.0, cy - robot_size / 2.0, robot_size, ws.dot);
+    } else {
+        set_frame(dot, dot_frame);
+        set_fill(dot, ws.dot);
+    }
+}

@@ -417,6 +417,13 @@ impl Settings {
         self.notif_modes.get(ws).copied().unwrap_or(NotifMode::All)
     }
 
+    /// A workspace was removed; the modes of those after it move down one.
+    pub fn forget_workspace(&mut self, ws: usize) {
+        if ws < self.notif_modes.len() {
+            self.notif_modes.remove(ws);
+        }
+    }
+
     pub fn set_notif_mode(&mut self, ws: usize, mode: NotifMode) {
         if ws >= self.notif_modes.len() {
             self.notif_modes.resize(ws + 1, NotifMode::All);

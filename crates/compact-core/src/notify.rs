@@ -150,6 +150,17 @@ impl Notifications {
         self.items.retain(|n| n.workspace != ws || n.kind == Kind::Status);
     }
 
+    /// A workspace was removed: drop its toasts, and renumber the ones from
+    /// workspaces after it so they still point where they came from.
+    pub fn forget_workspace(&mut self, ws: usize) {
+        self.items.retain(|n| n.workspace != ws);
+        for n in &mut self.items {
+            if n.workspace > ws {
+                n.workspace -= 1;
+            }
+        }
+    }
+
     /// Newest actionable notification from a workspace other than the current
     /// one (⌘⇧J). Status toasts are never actionable.
     pub fn latest_elsewhere(&self, current: usize) -> Option<&Notification> {

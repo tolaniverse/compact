@@ -43,6 +43,7 @@ impl Row {
 struct Card {
     root: Layer,
     dot: Layer,
+    robot: Robot,
     name: Layer,
     key: Layer,
     badge: Layer,
@@ -77,10 +78,12 @@ impl Card {
         for p in &previews {
             add_sublayer(&root, p);
         }
+        let robot = Robot::new(&root);
         add_sublayer(parent, &root);
         Self {
             root,
             dot,
+            robot,
             name,
             key,
             badge,
@@ -498,7 +501,7 @@ impl Overlays {
                         1.0,
                     );
                     rotate(&card.root, if on { 0.0 } else { tilts[i % 3].to_radians() });
-                    set_fill(&card.dot, ws.dot);
+                    show_marker(&card.dot, &card.robot, ws, rect(16.0, 20.0, 7.0, 7.0), 14.0);
                     set_frame(&card.name, rect(31.0, 16.0, cw - 110.0, 17.0));
                     set_text(&card.name, &ws.name);
                     set_color(

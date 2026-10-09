@@ -85,6 +85,15 @@ impl LiveBudget {
         }
     }
 
+    /// How many tabs agent workspaces may keep live between them.
+    ///
+    /// A third of the live set, and at least one. An agent working in the
+    /// background should not be able to push the tabs you are using out of
+    /// memory, however many pages it opens.
+    pub fn agent_live(&self) -> usize {
+        (self.max_live / 3).max(1)
+    }
+
     /// The effective byte ceiling once pressure is applied.
     pub fn effective_bytes(&self, pressure: Pressure) -> u64 {
         (self.max_bytes as f64 * pressure.budget_scale()) as u64
@@ -110,14 +119,32 @@ impl EvictionPlan {
 /// shed coldest-first until the live set fits both the byte budget and the
 /// count ceiling, stopping at `min_live`.
 pub fn plan_eviction(tabs: &[TabMeta], active: TabId, budget: &LiveBudget, pressure: Pressure) -> EvictionPlan {
-    // Live tabs, coldest first. The active tab is excluded up front rather than
-    // filtered later so it can never be chosen even when it is the coldest --
-    // which happens after restoring an old tab from the switcher.
+    plan_eviction_with(tabs, active, budget, pressure, &[])
+}
+
+/// [`plan_eviction`], with `agent` naming the tabs that belong to agent
+/// workspaces.
+///
+/// Agent tabs are held to [`LiveBudget::agent_live`] on their own, and when
+/// the whole live set is over budget they go first, coldest first, before any
+/// of yours. The active tab is still never evicted, whoever owns it.
+pub fn plan_eviction_with(
+    tabs: &[TabMeta],
+    active: TabId,
+    budget: &LiveBudget,
+    pressure: Pressure,
+    agent: &[TabId],
+) -> EvictionPlan {
+    let is_agent = |t: &TabMeta| agent.contains(&t.id);
+    // Live tabs, agents' first, then coldest first. The active tab is excluded
+    // up front rather than filtered later so it can never be chosen even when
+    // it is the coldest -- which happens after restoring an old tab from the
+    // switcher.
     let mut candidates: Vec<&TabMeta> = tabs
         .iter()
         .filter(|t| t.state.is_live() && t.id != active)
         .collect();
-    candidates.sort_by_key(|t| (t.last_active, t.id));
+    candidates.sort_by_key(|t| (!is_agent(t), t.last_active, t.id));
 
     let live_count = tabs.iter().filter(|t| t.state.is_live()).count();
     let mut bytes: u64 = tabs
@@ -131,6 +158,19 @@ pub fn plan_eviction(tabs: &[TabMeta], active: TabId, budget: &LiveBudget, press
 
     let mut hibernate = Vec::new();
     let mut remaining = live_count;
+
+    // Agents over their own slice shed first, whatever the totals say.
+    let mut agent_live = tabs.iter().filter(|t| t.state.is_live() && is_agent(t)).count();
+    for tab in candidates.iter().filter(|t| is_agent(t)) {
+        if agent_live <= budget.agent_live() || remaining <= min_live {
+            break;
+        }
+        bytes = bytes.saturating_sub(tab.effective_footprint());
+        remaining -= 1;
+        agent_live -= 1;
+        hibernate.push(tab.id);
+    }
+    candidates.retain(|t| !hibernate.contains(&t.id));
 
     for tab in candidates {
         if remaining <= min_live {

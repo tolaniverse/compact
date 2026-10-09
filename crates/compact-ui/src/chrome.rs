@@ -24,6 +24,8 @@ struct TabRow {
     /// Letter drawn inside `dot`, for bookmark chips. Hidden for tabs, whose
     /// dot is a plain status marker.
     initial: Layer,
+    /// Stands in for `dot` on an agent workspace's row in ELSEWHERE.
+    robot: Robot,
 }
 
 impl TabRow {
@@ -38,6 +40,7 @@ impl TabRow {
         add_sublayer(&root, &dot);
         add_sublayer(&root, &title);
         add_sublayer(&root, &close);
+        let robot = Robot::new(&root);
         add_sublayer(parent, &root);
         Self {
             root,
@@ -45,6 +48,7 @@ impl TabRow {
             title,
             close,
             initial,
+            robot,
         }
     }
 }
@@ -53,6 +57,7 @@ impl TabRow {
 struct Toast {
     root: Layer,
     dot: Layer,
+    robot: Robot,
     ws: Layer,
     age: Layer,
     body: Layer,
@@ -79,10 +84,12 @@ impl Toast {
         for l in [&dot, &ws, &age, &body, &source, &action, &close] {
             add_sublayer(&root, l);
         }
+        let robot = Robot::new(&root);
         add_sublayer(parent, &root);
         Self {
             root,
             dot,
+            robot,
             ws,
             age,
             body,
@@ -111,6 +118,7 @@ pub struct Chrome {
     pub sidebar: Retained<NSVisualEffectView>,
     sidebar_root: Layer,
     ws_dot: Layer,
+    ws_robot: Robot,
     ws_name: Layer,
     ws_count: Layer,
     side_rows: Vec<TabRow>,
@@ -274,6 +282,7 @@ impl Chrome {
         ] {
             add_sublayer(&sidebar_root, l);
         }
+        let ws_robot = Robot::new(&sidebar_root);
 
         // ---- strip ----
         let strip = blur_view(mtm, zero, 0.0);
@@ -359,6 +368,7 @@ impl Chrome {
             sidebar,
             sidebar_root,
             ws_dot,
+            ws_robot,
             ws_name,
             ws_count,
             side_rows: Vec::new(),
@@ -631,7 +641,7 @@ impl Chrome {
         let inner = sw - 20.0;
         let ws = app.workspaces.current();
 
-        set_fill(&self.ws_dot, ws.dot);
+        show_marker(&self.ws_dot, &self.ws_robot, ws, rect(6.0, 52.0, 7.0, 7.0), 14.0);
         set_frame(&self.ws_name, rect(27.0, 49.0, inner - 60.0, 16.0));
         set_text(&self.ws_name, &ws.name);
         set_frame(&self.ws_count, rect(sw - 70.0, 50.0, 60.0, 13.0));
@@ -756,8 +766,7 @@ impl Chrome {
                     set_frame(&row.root, rect(10.0, ey + i as f64 * 37.0, inner, 34.0));
                     set_fill(&row.root, Rgba::white(0.0));
                     set_border(&row.root, Rgba::white(0.0), 0.0);
-                    set_frame(&row.dot, rect(9.0, 14.5, 5.0, 5.0));
-                    set_fill(&row.dot, w.dot);
+                    show_marker(&row.dot, &row.robot, w, rect(9.0, 14.5, 5.0, 5.0), 12.0);
                     set_frame(&row.title, rect(23.0, 9.5, inner - 70.0, 15.0));
                     set_text(&row.title, &w.name);
                     set_color(&row.title, fg::SECONDARY);
@@ -956,10 +965,12 @@ impl Chrome {
                         set_frame(&toast.root, rect(0.0, ty, tw, th));
                         set_opacity(&toast.root, 1.0);
                     });
-                    let dot = app.workspaces.spaces[n.workspace].dot;
+                    let space = &app.workspaces.spaces[n.workspace];
+                    let dot = space.dot;
                     set_hidden(&toast.root, false);
-                    set_fill(&toast.dot, dot);
-                    set_frame(&toast.ws, rect(27.0, 12.0, 120.0, 13.0));
+                    show_marker(&toast.dot, &toast.robot, space, rect(13.0, 14.0, 6.0, 6.0), 12.0);
+                    // Wide enough for "CLAUDE CODE'S WORKSPACE".
+                    set_frame(&toast.ws, rect(27.0, 12.0, tw - 110.0, 13.0));
                     set_text(
                         &toast.ws,
                         &app.workspaces.spaces[n.workspace].name.to_uppercase(),

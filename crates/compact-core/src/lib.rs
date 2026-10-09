@@ -40,7 +40,7 @@ use policy::{LiveBudget, MemoryReport, Pressure};
 use settings::{NotifMode, Settings};
 use tab::{TabId, TabState};
 use theme::Rgba;
-use workspace::WorkspaceSet;
+use workspace::{Control, WorkspaceSet};
 
 /// Which modal surface, if any, is on top.
 ///
@@ -361,7 +361,13 @@ impl App {
 
     pub fn commands(&self) -> Vec<Command> {
         command::filter(
-            command::command_list(&self.settings.keymap, self.chrome.layout, self.chrome.pinned, self.is_bookmarked()),
+            command::command_list(
+                &self.settings.keymap,
+                self.chrome.layout,
+                self.chrome.pinned,
+                self.is_bookmarked(),
+                self.workspaces.current().agent.as_ref().map(|a| (self.workspaces.current, a)),
+            ),
             &self.query,
         )
     }
@@ -582,8 +588,99 @@ impl App {
                 }
             }
             Action::RemoveBookmark(id) => self.bookmarks.remove(id),
+            Action::TakeControl => {
+                self.overlay = Overlay::None;
+                self.take_control();
+            }
+            Action::HandBack => {
+                self.overlay = Overlay::None;
+                self.hand_back();
+            }
+            Action::CloseWorkspace(i) => {
+                self.overlay = Overlay::None;
+                fx.extend(self.close_agent_workspace(i));
+            }
         }
         fx
+    }
+
+    // ---- agent workspaces ---------------------------------------------------
+
+    /// Give `client` a workspace for `project`, or hand back the one it had.
+    ///
+    /// A new workspace announces itself, so an agent never starts browsing
+    /// somewhere you did not hear about. Returns the workspace's index.
+    pub fn open_agent_workspace(&mut self, client: &str, project: &str) -> usize {
+        let (i, new) = self.workspaces.open_agent(client, project);
+        if new {
+            self.settings.set_notif_mode(i, NotifMode::All);
+            let tab = self.workspaces.spaces[i].active;
+            self.post_activity(i, format!("Started working in {project}"), client.to_string(), tab, self.clock);
+        }
+        i
+    }
+
+    /// Close an agent workspace and destroy its tabs.
+    pub fn close_agent_workspace(&mut self, index: usize) -> Vec<Effect> {
+        let mut fx = Vec::new();
+        let was_current = self.workspaces.current == index;
+        let Some(tabs) = self.workspaces.close_agent(index) else {
+            return fx;
+        };
+        fx.extend(tabs.into_iter().map(Effect::Destroy));
+        self.settings.forget_workspace(index);
+        self.notifications.forget_workspace(index);
+        if was_current {
+            // Back to your first workspace, the way ⌘1 would take you.
+            self.address_draft = None;
+            fx.push(Effect::SlideWorkspace(-1));
+            let active = self.workspaces.current().active;
+            fx.extend(self.select_tab(active));
+            self.post_arrival(self.workspaces.current);
+        } else {
+            self.reconcile_into(&mut fx);
+        }
+        fx
+    }
+
+    /// Whether the agent of workspace `ws` may act right now.
+    ///
+    /// False for your own workspaces and while you have taken over.
+    pub fn agent_may_act(&self, ws: usize) -> bool {
+        self.workspaces
+            .spaces
+            .get(ws)
+            .and_then(|w| w.agent.as_ref())
+            .is_some_and(|a| a.control == Control::Agent)
+    }
+
+    /// You take the wheel in the current agent workspace. Returns true if
+    /// that changed anything.
+    pub fn take_control(&mut self) -> bool {
+        self.set_control(Control::User)
+    }
+
+    /// The agent takes the wheel back. Returns true if that changed anything.
+    pub fn hand_back(&mut self) -> bool {
+        self.set_control(Control::Agent)
+    }
+
+    fn set_control(&mut self, to: Control) -> bool {
+        let ws = self.workspaces.current;
+        let w = self.workspaces.current_mut();
+        let tab = w.active;
+        let Some(agent) = w.agent.as_mut() else { return false };
+        if agent.control == to {
+            return false;
+        }
+        agent.control = to;
+        let client = agent.client.clone();
+        let (text, source) = match to {
+            Control::User => ("You have control".to_string(), format!("{client} is paused · ⌘K to hand back")),
+            Control::Agent => (format!("{client} has control"), "⌘K to take it back".to_string()),
+        };
+        self.notifications.push_status(ws, text, source, tab, self.clock);
+        true
     }
 
     // ---- internal pages -----------------------------------------------------
@@ -1027,7 +1124,8 @@ impl App {
         let active = self.workspaces.current().active;
         let tabs = self.workspaces.all_tabs();
 
-        let plan = policy::plan_eviction(&tabs, active, &self.budget, self.pressure);
+        let agent_tabs = self.workspaces.agent_tabs();
+        let plan = policy::plan_eviction_with(&tabs, active, &self.budget, self.pressure, &agent_tabs);
         for id in &plan.hibernate {
             self.workspaces.set_state(*id, TabState::Hibernated);
             fx.push(Effect::Hibernate(*id));
@@ -1046,7 +1144,9 @@ impl App {
                 .spaces
                 .iter()
                 .enumerate()
-                .filter(|(i, _)| *i != self.workspaces.current)
+                // Not agents': their tabs come back when the agent asks for
+                // them, and guessing on their behalf spends your memory.
+                .filter(|(i, w)| *i != self.workspaces.current && !w.is_agent())
                 .map(|(_, w)| w.active)
                 .filter(|id| {
                     self.workspaces
