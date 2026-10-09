@@ -6,7 +6,8 @@
 //! file system.
 //!
 //! **Saved:** workspaces and their tabs (title, host, URL, page kind), which
-//! agent owns an agent workspace, which tab and workspace were in front, bookmarks, the chrome configuration and the
+//! agent owns an agent workspace, which agents you approved for which
+//! projects, which tab and workspace were in front, bookmarks, the chrome configuration and the
 //! settings page, keymap included.
 //!
 //! **Not saved, on purpose:** history (see [`crate::HISTORY_LIMIT`] — it is
@@ -132,6 +133,9 @@ pub fn encode(app: &App) -> String {
     for b in app.bookmarks.items() {
         line(&mut out, &["bookmark", &b.title, &b.host, &rgba_field(b.tint)]);
     }
+    for a in &app.approvals {
+        line(&mut out, &["approved", &a.client, &a.project]);
+    }
     out
 }
 
@@ -239,6 +243,7 @@ pub fn decode(text: &str) -> Result<App, LoadError> {
     let mut spaces: Vec<SavedSpace> = Vec::new();
     let mut modes: Vec<NotifMode> = Vec::new();
     let mut bookmarks = Bookmarks::default();
+    let mut approvals: Vec<crate::agent::Approval> = Vec::new();
     let mut binds: Vec<(BindingId, Chord)> = Vec::new();
 
     for (i, raw) in lines {
@@ -314,6 +319,8 @@ pub fn decode(text: &str) -> Result<App, LoadError> {
                     client: f[1].clone(),
                     project: f[2].clone(),
                     control: Control::Agent,
+                    hosts: Vec::new(),
+                    connected: false,
                 });
             }
             "tab" => {
@@ -335,6 +342,10 @@ pub fn decode(text: &str) -> Result<App, LoadError> {
                 need(4)?;
                 let tint = parse_rgba(&f[3]).ok_or_else(|| bad("unreadable bookmark tint"))?;
                 bookmarks.insert(f[1].clone(), f[2].clone(), tint);
+            }
+            "approved" => {
+                need(3)?;
+                approvals.push(crate::agent::Approval { client: f[1].clone(), project: f[2].clone() });
             }
             // Written by a newer build of the same format version.
             _ => {}
@@ -362,6 +373,7 @@ pub fn decode(text: &str) -> Result<App, LoadError> {
     app.chrome = chrome;
     app.settings = settings;
     app.bookmarks = bookmarks;
+    app.approvals = approvals;
     app.workspaces = WorkspaceSet::from_saved(&spaces, current);
     apply_startup(&mut app);
     Ok(app)

@@ -119,7 +119,7 @@ impl EvictionPlan {
 /// shed coldest-first until the live set fits both the byte budget and the
 /// count ceiling, stopping at `min_live`.
 pub fn plan_eviction(tabs: &[TabMeta], active: TabId, budget: &LiveBudget, pressure: Pressure) -> EvictionPlan {
-    plan_eviction_with(tabs, active, budget, pressure, &[])
+    plan_eviction_with(tabs, active, budget, pressure, &[], &[])
 }
 
 /// [`plan_eviction`], with `agent` naming the tabs that belong to agent
@@ -128,21 +128,28 @@ pub fn plan_eviction(tabs: &[TabMeta], active: TabId, budget: &LiveBudget, press
 /// Agent tabs are held to [`LiveBudget::agent_live`] on their own, and when
 /// the whole live set is over budget they go first, coldest first, before any
 /// of yours. The active tab is still never evicted, whoever owns it.
+///
+/// `working` names the tabs connected agents are working in. They are kept
+/// like the active tab — an agent that opens a page and is then told it has
+/// gone cannot do anything — except under critical pressure, where only the
+/// tab you are looking at is sure to survive.
 pub fn plan_eviction_with(
     tabs: &[TabMeta],
     active: TabId,
     budget: &LiveBudget,
     pressure: Pressure,
     agent: &[TabId],
+    working: &[TabId],
 ) -> EvictionPlan {
     let is_agent = |t: &TabMeta| agent.contains(&t.id);
+    let kept = |t: &TabMeta| t.id == active || (pressure != Pressure::Critical && working.contains(&t.id));
     // Live tabs, agents' first, then coldest first. The active tab is excluded
     // up front rather than filtered later so it can never be chosen even when
     // it is the coldest -- which happens after restoring an old tab from the
     // switcher.
     let mut candidates: Vec<&TabMeta> = tabs
         .iter()
-        .filter(|t| t.state.is_live() && t.id != active)
+        .filter(|t| t.state.is_live() && !kept(t))
         .collect();
     candidates.sort_by_key(|t| (!is_agent(t), t.last_active, t.id));
 

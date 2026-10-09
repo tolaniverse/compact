@@ -159,6 +159,12 @@ fn bundle_task(args: &[String]) -> Result<PathBuf, String> {
 
     let mut c = Command::new(cargo());
     c.current_dir(&root).args(["build", "--package", &opts.bin]);
+    // The browser ships with the MCP server agents run, so an agent's config
+    // can point inside the app it is talking to.
+    let with_mcp = opts.bin == "compact";
+    if with_mcp {
+        c.args(["--package", "compact-mcp"]);
+    }
     if opts.release {
         c.arg("--release");
     }
@@ -184,6 +190,16 @@ fn bundle_task(args: &[String]) -> Result<PathBuf, String> {
         .map_err(|e| format!("creating Resources: {e}"))?;
 
     fs::copy(&exe, macos_dir.join(&opts.bin)).map_err(|e| format!("copying binary: {e}"))?;
+    if with_mcp {
+        let mcp = macos_dir.join("compact-mcp");
+        fs::copy(root.join("target").join(profile).join("compact-mcp"), &mcp)
+            .map_err(|e| format!("copying compact-mcp: {e}"))?;
+        // Nested executables are signed on their own, before the bundle.
+        run(
+            Command::new("codesign").args(["--force", "--sign", "-", "--timestamp=none"]).arg(&mcp),
+            "codesigning compact-mcp",
+        )?;
+    }
     fs::write(app.join("Contents").join("Info.plist"), info_plist(&opts.bin, &app_name))
         .map_err(|e| format!("writing Info.plist: {e}"))?;
     fs::write(app.join("Contents").join("PkgInfo"), "APPL????")

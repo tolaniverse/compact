@@ -1784,7 +1784,7 @@ fn agent_tabs_are_evicted_before_yours() {
     // Ids 1–2 are yours and coldest; 3–4 are the agent's and warmer.
     let tabs = live_tabs(&[100, 100, 100, 100, 100]);
     let agent = [TabId(3), TabId(4)];
-    let plan = plan_eviction_with(&tabs, TabId(5), &budget(300, 8, 1), Pressure::Normal, &agent);
+    let plan = plan_eviction_with(&tabs, TabId(5), &budget(300, 8, 1), Pressure::Normal, &agent, &[]);
     assert_eq!(plan.hibernate, vec![TabId(3), TabId(4)]);
 }
 
@@ -1795,7 +1795,7 @@ fn agents_are_held_to_their_own_slice_even_under_budget() {
     let agent = [TabId(2), TabId(3), TabId(4), TabId(5)];
     let b = budget(4000, 6, 1);
     assert_eq!(b.agent_live(), 2);
-    let plan = plan_eviction_with(&tabs, TabId(6), &b, Pressure::Normal, &agent);
+    let plan = plan_eviction_with(&tabs, TabId(6), &b, Pressure::Normal, &agent, &[]);
     assert_eq!(plan.hibernate, vec![TabId(2), TabId(3)], "coldest agent tabs over the slice");
 }
 
@@ -1803,7 +1803,7 @@ fn agents_are_held_to_their_own_slice_even_under_budget() {
 fn the_active_tab_survives_even_in_an_agent_workspace() {
     let tabs = live_tabs(&[100, 100, 100]);
     let agent = [TabId(1), TabId(2), TabId(3)];
-    let plan = plan_eviction_with(&tabs, TabId(1), &budget(100, 8, 1), Pressure::Normal, &agent);
+    let plan = plan_eviction_with(&tabs, TabId(1), &budget(100, 8, 1), Pressure::Normal, &agent, &[]);
     assert!(!plan.hibernate.contains(&TabId(1)));
 }
 
@@ -1880,4 +1880,165 @@ fn each_agent_workspace_has_its_own_profile() {
     assert!(matches!(pa, Profile::Agent(_)));
     assert_ne!(pa, pb, "agents never share cookies");
     assert_eq!(app.workspaces.profile_of(TabId(9999)), Profile::Personal, "unknown tabs get no agent's store");
+}
+
+// ---- agent requests --------------------------------------------------------
+
+use crate::agent::{is_loopback, parse_tab_ref, tab_ref, url_host, AgentError, UrlCheck, MAX_AGENT_TABS};
+
+fn agent_app() -> (App, usize) {
+    let mut app = App::fresh();
+    let ws = app.open_agent_workspace("Claude Code", "~/site");
+    (app, ws)
+}
+
+#[test]
+fn hosts_are_read_the_way_the_network_reads_them() {
+    assert_eq!(url_host("http://localhost:3000/a").as_deref(), Some("localhost"));
+    assert_eq!(url_host("https://Example.COM").as_deref(), Some("example.com"));
+    assert_eq!(url_host("http://localhost@evil.test/").as_deref(), Some("evil.test"), "user info is not the host");
+    assert_eq!(url_host("http://[::1]:8080/").as_deref(), Some("[::1]"));
+    assert_eq!(url_host("ftp://x"), None);
+    assert!(is_loopback("app.localhost"));
+    assert!(!is_loopback("localhost.evil.test"));
+    assert_eq!(parse_tab_ref(&tab_ref(TabId(12))), Some(TabId(12)));
+    assert_eq!(parse_tab_ref("12"), Some(TabId(12)));
+    assert_eq!(parse_tab_ref("tab"), None);
+}
+
+#[test]
+fn loopback_is_allowed_and_everything_else_is_asked_once() {
+    let (mut app, ws) = agent_app();
+    assert_eq!(app.check_url(ws, "localhost:3000"), UrlCheck::Allowed("http://localhost:3000".into()));
+    assert!(matches!(app.check_url(ws, "127.0.0.1:5173/x"), UrlCheck::Allowed(_)));
+    match app.check_url(ws, "docs.rs/serde") {
+        UrlCheck::Ask { host, url } => {
+            assert_eq!(host, "docs.rs");
+            assert_eq!(url, "https://docs.rs/serde");
+        }
+        other => panic!("{other:?}"),
+    }
+    assert!(matches!(app.check_url(ws, "http://localhost@evil.test"), UrlCheck::Ask { host, .. } if host == "evil.test"));
+    app.allow_host(ws, "docs.rs");
+    assert!(matches!(app.check_url(ws, "https://docs.rs/tokio"), UrlCheck::Allowed(_)));
+    let other = app.open_agent_workspace("Muse", "~/site");
+    assert!(matches!(app.check_url(other, "docs.rs"), UrlCheck::Ask { .. }), "a yes is per agent");
+}
+
+#[test]
+fn schemes_past_the_web_are_refused() {
+    let (app, ws) = agent_app();
+    for bad in ["file:///etc/passwd", "javascript:alert(1)", "data:text/html,hi", "compact://settings", "ftp://x.test", "chrome://flags"] {
+        assert!(matches!(app.check_url(ws, bad), UrlCheck::Refused(_)), "{bad}");
+    }
+}
+
+#[test]
+fn an_agent_opens_tabs_in_its_own_workspace_without_moving_you() {
+    let (mut app, ws) = agent_app();
+    let (first, fx) = app.agent_open(ws, "localhost:3000").unwrap();
+    assert!(fx.contains(&Effect::Load(first, "http://localhost:3000".into())));
+    assert_eq!(app.workspaces.spaces[ws].tabs.len(), 1, "the blank new-tab page was reused");
+    assert_eq!(app.workspaces.current, 0, "you stay where you are");
+
+    let (second, _) = app.agent_open(ws, "localhost:3000/pricing").unwrap();
+    assert_ne!(first, second);
+    assert_eq!(app.workspaces.spaces[ws].active, second);
+    assert_eq!(app.workspaces.spaces[0].tabs.len(), 1, "your workspace is untouched");
+}
+
+#[test]
+fn an_agent_cannot_touch_tabs_outside_its_workspace() {
+    let (mut app, ws) = agent_app();
+    let yours = app.workspaces.spaces[0].active;
+    assert_eq!(app.agent_navigate(ws, yours, "localhost:1").unwrap_err(), AgentError::NoSuchTab(yours));
+    assert_eq!(app.agent_close(ws, yours).unwrap_err(), AgentError::NoSuchTab(yours));
+    assert_eq!(app.agent_wake(ws, yours).unwrap_err(), AgentError::NoSuchTab(yours));
+    assert_eq!(app.agent_open(0, "localhost:1").unwrap_err(), AgentError::NotAgentWorkspace);
+}
+
+#[test]
+fn an_agent_waits_while_you_have_control_but_may_still_look() {
+    let (mut app, ws) = agent_app();
+    let (tab, _) = app.agent_open(ws, "localhost:3000").unwrap();
+    app.apply(Action::SwitchWorkspace(ws));
+    app.apply(Action::TakeControl);
+    assert!(matches!(app.agent_open(ws, "localhost:3000"), Err(AgentError::Paused { .. })));
+    assert!(matches!(app.agent_navigate(ws, tab, "localhost:1"), Err(AgentError::Paused { .. })));
+    assert!(app.agent_wake(ws, tab).is_ok(), "looking is not acting");
+}
+
+#[test]
+fn unapproved_sites_are_not_loaded() {
+    let (mut app, ws) = agent_app();
+    assert_eq!(
+        app.agent_open(ws, "example.com").unwrap_err(),
+        AgentError::NeedsApproval { host: "example.com".into() }
+    );
+    assert_eq!(app.workspaces.spaces[ws].tabs[0].kind, crate::page::PageKind::NewTab, "nothing changed");
+}
+
+#[test]
+fn an_agent_hits_a_wall_on_tabs() {
+    let (mut app, ws) = agent_app();
+    for i in 0..MAX_AGENT_TABS {
+        app.agent_open(ws, &format!("localhost:{}", 3000 + i)).unwrap();
+    }
+    assert_eq!(app.agent_open(ws, "localhost:9999").unwrap_err(), AgentError::TooManyTabs);
+}
+
+#[test]
+fn the_last_agent_tab_stays() {
+    let (mut app, ws) = agent_app();
+    let only = app.workspaces.spaces[ws].active;
+    assert!(matches!(app.agent_close(ws, only), Err(AgentError::Refused(_))));
+}
+
+#[test]
+fn approvals_survive_a_restart_and_revoking_closes_the_workspace() {
+    let (mut app, ws) = agent_app();
+    app.approve("Claude Code", "~/site");
+    app.approve("Claude Code", "~/site");
+    assert_eq!(app.approvals.len(), 1);
+    let back = persist::decode(&app.snapshot()).unwrap();
+    assert!(back.is_approved("Claude Code", "~/site"));
+    assert!(!back.is_approved("Claude Code", "~/other"));
+
+    let fx = app.apply(Action::RevokeAgent(ws));
+    assert!(fx.iter().any(|e| matches!(e, Effect::Destroy(_))));
+    assert!(!app.is_approved("Claude Code", "~/site"));
+    assert_eq!(app.agent_workspace("Claude Code", "~/site"), None);
+}
+
+#[test]
+fn a_reconnecting_agent_finds_its_workspace() {
+    let (app, ws) = agent_app();
+    assert_eq!(app.agent_workspace("Claude Code", "~/site"), Some(ws));
+    assert_eq!(app.agent_workspace("Claude Code", "~/elsewhere"), None);
+}
+
+#[test]
+fn a_connected_agents_working_tab_outlives_your_prewarmed_ones() {
+    // You are on 1; 2 and 3 are prewarmed; 4 is the tab an agent just opened.
+    let tabs = live_tabs(&[100, 100, 100, 100]);
+    let agent = [TabId(4)];
+    let mut b = budget(4000, 3, 1);
+    let plan = plan_eviction_with(&tabs, TabId(1), &b, Pressure::Normal, &agent, &[]);
+    assert_eq!(plan.hibernate, vec![TabId(4)], "a disconnected agent's tab goes first");
+    let plan = plan_eviction_with(&tabs, TabId(1), &b, Pressure::Normal, &agent, &agent);
+    assert_eq!(plan.hibernate, vec![TabId(2)], "a speculative prewarm yields to work in progress");
+    b.max_live = 8;
+    let plan = plan_eviction_with(&tabs, TabId(1), &b, Pressure::Critical, &agent, &agent);
+    assert!(plan.hibernate.contains(&TabId(4)), "under critical pressure only your tab is sure");
+}
+
+#[test]
+fn only_connected_agents_hold_a_working_tab() {
+    let (mut app, ws) = agent_app();
+    assert!(app.workspaces.agent_working_tabs().is_empty());
+    assert!(app.set_agent_connected("Claude Code", "~/site", true));
+    assert_eq!(app.workspaces.agent_working_tabs(), vec![app.workspaces.spaces[ws].active]);
+    app.apply(Action::SwitchWorkspace(ws));
+    app.apply(Action::TakeControl);
+    assert!(app.workspaces.agent_working_tabs().is_empty(), "not while you drive");
 }

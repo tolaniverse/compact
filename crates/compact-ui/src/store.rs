@@ -42,12 +42,11 @@ impl Store {
     ///
     /// `COMPACT_STATE_DIR` overrides it, so a test run or a second profile can
     /// point somewhere else without touching the real one.
+    ///
+    /// Shared with `compact-mcp`, which finds the agent socket in the same
+    /// place.
     pub fn default_dir() -> Option<PathBuf> {
-        if let Some(dir) = std::env::var_os("COMPACT_STATE_DIR") {
-            return Some(PathBuf::from(dir));
-        }
-        let home = std::env::var_os("HOME")?;
-        Some(Path::new(&home).join("Library/Application Support/Compact"))
+        compact_agent::paths::state_dir()
     }
 
     /// Load the state in `dir`, or start fresh if there is none.

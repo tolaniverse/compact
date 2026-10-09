@@ -1,0 +1,9 @@
+[package]
+name = "compact-agent"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "How outside agents talk to Compact: the socket, its wire format and the tools it offers"
+
+[dependencies]
+serde_json = { workspace = true }

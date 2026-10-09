@@ -53,6 +53,8 @@ pub enum Action {
     HandBack,
     /// Close an agent workspace and its tabs. Ignored for your own.
     CloseWorkspace(usize),
+    /// Close an agent workspace and take back its agent's access.
+    RevokeAgent(usize),
 }
 
 /// A palette row.
@@ -103,7 +105,13 @@ pub fn command_list(
             hint: String::new(),
             action: Action::CloseWorkspace(ws),
         };
-        [control, close]
+        let revoke = Command {
+            icon: "⊘",
+            label: format!("Revoke {}'s access", a.client),
+            hint: String::new(),
+            action: Action::RevokeAgent(ws),
+        };
+        [control, close, revoke]
     });
     agent_rows.chain(vec![
         Command { icon: "+", label: "New tab".into(), hint: key(BindingId::NewTab), action: Action::NewTab },

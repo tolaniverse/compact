@@ -13,6 +13,7 @@
 //! The shell drives this by calling [`App::apply`] with an [`Action`], then
 //! draining the returned [`Effect`]s.
 
+pub mod agent;
 pub mod bookmark;
 pub mod bridge;
 pub mod chrome;
@@ -230,6 +231,8 @@ pub struct App {
     pub settings: Settings,
     /// Most-recently-visited first, deduplicated by host.
     pub history: Vec<Visit>,
+    /// Agents you allowed, and the project each may work in.
+    pub approvals: Vec<agent::Approval>,
 
     /// Palette query and highlighted row.
     pub query: String,
@@ -299,6 +302,7 @@ impl App {
             pressure: Pressure::Normal,
             settings: Settings::default(),
             history: Vec::new(),
+            approvals: Vec::new(),
             query: String::new(),
             selection: 0,
             address_draft: None,
@@ -607,6 +611,10 @@ impl App {
             Action::CloseWorkspace(i) => {
                 self.overlay = Overlay::None;
                 fx.extend(self.close_agent_workspace(i));
+            }
+            Action::RevokeAgent(i) => {
+                self.overlay = Overlay::None;
+                fx.extend(self.revoke_agent(i));
             }
         }
         fx
@@ -1133,7 +1141,9 @@ impl App {
         let tabs = self.workspaces.all_tabs();
 
         let agent_tabs = self.workspaces.agent_tabs();
-        let plan = policy::plan_eviction_with(&tabs, active, &self.budget, self.pressure, &agent_tabs);
+        let working = self.workspaces.agent_working_tabs();
+        let plan =
+            policy::plan_eviction_with(&tabs, active, &self.budget, self.pressure, &agent_tabs, &working);
         for id in &plan.hibernate {
             self.workspaces.set_state(*id, TabState::Hibernated);
             fx.push(Effect::Hibernate(*id));

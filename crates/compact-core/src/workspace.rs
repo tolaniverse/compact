@@ -39,6 +39,12 @@ pub struct AgentInfo {
     /// reconnecting agent is matched on, so it gets its own tabs back.
     pub project: String,
     pub control: Control,
+    /// Sites beyond loopback you let this agent open, this session. Not
+    /// saved: a restart asks again.
+    pub hosts: Vec<String>,
+    /// Whether the agent is connected right now. While it is, the tab it is
+    /// working in is kept live like the one you are looking at. Not saved.
+    pub connected: bool,
 }
 
 impl AgentInfo {
@@ -272,6 +278,33 @@ impl WorkspaceSet {
         }
     }
 
+    /// Open a tab in workspace `ws` for its agent and make it that
+    /// workspace's active tab. Focus moves only if you are looking at `ws`.
+    pub fn new_tab_in(&mut self, ws: usize, title: &str, host: &str, url: &str) -> Option<TabId> {
+        let id = self.ids.next();
+        self.clock += 1;
+        let clock = self.clock;
+        let w = self.spaces.get_mut(ws)?;
+        let mut tab = TabMeta::new(id, title, host);
+        tab.url = url.to_string();
+        tab.last_active = clock;
+        w.tabs.push(tab);
+        w.active = id;
+        Some(id)
+    }
+
+    /// Make `id` workspace `ws`'s active tab and the most recently used.
+    pub fn focus_in(&mut self, ws: usize, id: TabId) {
+        self.clock += 1;
+        let clock = self.clock;
+        if let Some(w) = self.spaces.get_mut(ws) {
+            if let Some(t) = w.tab_mut(id) {
+                t.last_active = clock;
+                w.active = id;
+            }
+        }
+    }
+
     /// Append a blank tab and focus it (⌘T).
     pub fn new_tab(&mut self) -> TabId {
         let id = self.ids.next();
@@ -435,6 +468,8 @@ impl WorkspaceSet {
                 client: client.to_string(),
                 project: project.to_string(),
                 control: Control::Agent,
+                hosts: Vec::new(),
+                connected: false,
             }),
         });
         (n, true)
@@ -462,6 +497,16 @@ impl WorkspaceSet {
         self.locate(id)
             .and_then(|(i, _)| self.spaces[i].agent.as_ref())
             .map_or(Profile::Personal, |a| Profile::Agent(a.profile_key()))
+    }
+
+    /// The tab each connected agent is working in, unless you have taken
+    /// over its workspace.
+    pub fn agent_working_tabs(&self) -> Vec<TabId> {
+        self.spaces
+            .iter()
+            .filter(|w| w.agent.as_ref().is_some_and(|a| a.connected && a.control == Control::Agent))
+            .map(|w| w.active)
+            .collect()
     }
 
     /// Every tab that belongs to an agent workspace — what the policy ranks

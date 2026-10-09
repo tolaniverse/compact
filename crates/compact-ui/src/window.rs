@@ -30,6 +30,9 @@ use compact_core::{App, Effect, Overlay};
 use compact_engine::{EngineEvent, TabEngine, WebKitEngine};
 use compact_mem::{Guard, PressureMonitor};
 
+#[path = "agents.rs"]
+mod agents;
+
 use crate::chrome::{Chrome, Hit};
 use crate::overlays::{Overlays, SettingsHit};
 use crate::widgets::{
@@ -74,6 +77,9 @@ struct Inner {
     /// Set after a failed save has been reported, so a full disk produces one
     /// line on stderr rather than one a second.
     save_failed: bool,
+    /// The agent socket and the requests in flight on it. `None` in demo mode
+    /// and when another Compact already holds the socket.
+    agents: Option<agents::AgentHost>,
 }
 
 impl Inner {
@@ -520,6 +526,17 @@ impl Shell {
             buttons_shown: false,
             pending_focus: None,
             titled: std::collections::HashSet::new(),
+            // Demo mode is a sample, not a place agents should be working.
+            agents: match store {
+                None => None,
+                Some(_) => match agents::AgentHost::start() {
+                    Ok(h) => Some(h),
+                    Err(e) => {
+                        eprintln!("compact: agents cannot connect: {e}");
+                        None
+                    }
+                },
+            },
             store,
             save_failed: false,
         }));
@@ -950,6 +967,7 @@ fn install_load_poll(inner: &Rc<RefCell<Inner>>) {
     let block = RcBlock::new(move |_t: NonNull<NSTimer>| {
         let mut i = poll.borrow_mut();
         i.app.clock = i.now_ms();
+        i.service_agents();
         let active = i.app.workspaces.current().active;
         let Some((loading, progress)) = i.engine.load_state(active) else {
             return;
