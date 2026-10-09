@@ -20,6 +20,7 @@ pub mod command;
 pub mod html;
 pub mod notify;
 pub mod page;
+pub mod persist;
 pub mod policy;
 pub mod settings;
 pub mod tab;
@@ -273,6 +274,11 @@ impl Default for App {
 }
 
 impl App {
+    /// The canvas's demo state: seeded workspaces, tabs and bookmarks.
+    ///
+    /// This is what the tests run against and what `compact --demo` shows. A
+    /// real launch starts from [`App::fresh`] or a saved file instead — see
+    /// [`persist`].
     pub fn new() -> Self {
         Self {
             workspaces: WorkspaceSet::seeded(),
@@ -295,6 +301,36 @@ impl App {
             clock: 0,
             measured_footprint: None,
         }
+    }
+
+    /// A first launch: empty workspaces, no bookmarks, default settings.
+    pub fn fresh() -> Self {
+        Self {
+            workspaces: WorkspaceSet::fresh(),
+            bookmarks: Bookmarks::default(),
+            ..Self::new()
+        }
+    }
+
+    /// The durable part of this state, as the text of a state file.
+    pub fn snapshot(&self) -> String {
+        persist::encode(self)
+    }
+
+    /// Put the front tab on screen and let the budget fill in the rest.
+    ///
+    /// The shell's first call. Goes through the same activation path as a tab
+    /// switch, so a restored session that reopens on an internal page renders
+    /// it instead of trying to fetch `compact://newtab` over the network.
+    pub fn boot(&mut self) -> Vec<Effect> {
+        let active = self.workspaces.current().active;
+        let mut fx = Vec::new();
+        if let Some(eff) = self.activation_effect(active) {
+            self.workspaces.set_state(active, TabState::Live);
+            fx.push(eff);
+        }
+        self.reconcile_into(&mut fx);
+        fx
     }
 
     // ---- derived view state -------------------------------------------------

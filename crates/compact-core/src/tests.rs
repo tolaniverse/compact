@@ -1433,3 +1433,197 @@ fn the_settings_page_lists_every_binding_and_error() {
         assert!(html.contains(&w.name), "every workspace gets a notification rule");
     }
 }
+
+// ---- persistence ---------------------------------------------------------
+
+use crate::persist::{self, LoadError, FORMAT_VERSION};
+
+/// Everything a restart is supposed to carry, as one comparable value.
+fn durable(app: &App) -> Vec<String> {
+    let mut v = vec![
+        format!("current {}", app.workspaces.current),
+        format!("chrome {:?}", app.chrome),
+        format!("startup {:?} blocks {:?}", app.settings.startup, app.settings.blocks),
+        format!("modes {:?}", app.settings.notif_modes),
+    ];
+    for b in BindingId::ALL {
+        v.push(format!("bind {b:?} {:?}", app.settings.keymap.chord(b)));
+    }
+    for w in &app.workspaces.spaces {
+        v.push(format!("ws {} active {}", w.name, w.active_index()));
+        for t in &w.tabs {
+            v.push(format!("  {:?} {} {} {}", t.kind, t.title, t.host, t.url));
+        }
+    }
+    for b in app.bookmarks.items() {
+        v.push(format!("bm {} {} {:?}", b.title, b.host, b.tint));
+    }
+    v
+}
+
+#[test]
+fn a_restart_restores_what_the_user_left() {
+    let mut app = App::new();
+    app.settings.startup = Startup::RestoreSession;
+    app.apply(Action::ToggleLayout);
+    app.chrome.set_threshold(100.0);
+    app.chrome.dim_page = true;
+    app.settings.blocks.recents = false;
+    app.settings.set_notif_mode(1, NotifMode::Muted);
+    app.settings
+        .keymap
+        .rebind(BindingId::Switcher, Chord::new(false, false, true, "Space"));
+    app.apply(Action::SwitchWorkspace(1));
+    app.apply(Action::NewTab);
+    app.navigate("rust-lang.org");
+
+    let back = persist::decode(&app.snapshot()).expect("own output reads back");
+    assert_eq!(durable(&back), durable(&app));
+}
+
+#[test]
+fn restored_tabs_come_back_cold_with_fresh_ids() {
+    let mut app = App::new();
+    app.settings.startup = Startup::RestoreSession;
+    for w in &mut app.workspaces.spaces {
+        for t in &mut w.tabs {
+            t.state = TabState::Live;
+        }
+    }
+    let back = persist::decode(&app.snapshot()).unwrap();
+    let tabs = back.workspaces.all_tabs();
+    assert!(tabs.iter().all(|t| t.state == TabState::Cold), "no web view survives a restart");
+    let mut ids: Vec<_> = tabs.iter().map(|t| t.id).collect();
+    ids.dedup();
+    assert_eq!(ids.len(), tabs.len(), "ids are unique");
+    assert!(back.workspaces.current().active_tab().last_active
+        >= back.workspaces.current().tabs.iter().map(|t| t.last_active).max().unwrap(),
+        "the front tab ranks most recent for the first eviction pass");
+}
+
+#[test]
+fn history_is_not_written_down() {
+    let mut app = App::new();
+    app.navigate("secret-research.example");
+    assert!(!app.history.is_empty());
+    app.workspaces.current_mut().tabs.retain(|t| t.host != "secret-research.example");
+    let text = app.snapshot();
+    assert!(!text.contains("secret-research"), "history dies with the session");
+}
+
+#[test]
+fn a_first_launch_shows_no_demo_data() {
+    let app = App::fresh();
+    assert!(app.bookmarks.is_empty());
+    assert_eq!(app.workspaces.spaces.len(), 3, "⌘1–3 still has somewhere to go");
+    for w in &app.workspaces.spaces {
+        assert_eq!(w.tabs.len(), 1);
+        assert_eq!(w.tabs[0].kind, PageKind::NewTab);
+    }
+    let text = app.snapshot();
+    assert!(!text.contains("Sprint board") && !text.contains("github.com"));
+}
+
+#[test]
+fn startup_new_tab_restores_tabs_and_adds_one_in_front() {
+    let mut app = App::new();
+    app.settings.startup = Startup::NewTab;
+    app.apply(Action::SwitchWorkspace(2));
+    let before = app.workspaces.spaces[2].tabs.len();
+
+    let back = persist::decode(&app.snapshot()).unwrap();
+    assert_eq!(back.workspaces.current, 2, "lands in the workspace you left");
+    let ws = back.workspaces.current();
+    assert_eq!(ws.tabs.len(), before + 1, "nothing was thrown away");
+    assert_eq!(ws.active_tab().kind, PageKind::NewTab);
+}
+
+#[test]
+fn startup_pinned_workspace_lands_on_the_first() {
+    let mut app = App::new();
+    app.settings.startup = Startup::PinnedWorkspace;
+    app.apply(Action::SwitchWorkspace(2));
+    let back = persist::decode(&app.snapshot()).unwrap();
+    assert_eq!(back.workspaces.current, 0);
+}
+
+#[test]
+fn an_error_page_is_saved_as_the_site_it_failed_to_reach() {
+    let mut app = App::new();
+    app.settings.startup = Startup::RestoreSession;
+    let id = app.workspaces.current().active;
+    app.navigate("nonexistent-host.invalid");
+    app.fail_navigation(id, -1003);
+    assert_eq!(app.workspaces.current().active_tab().kind, PageKind::Error);
+
+    let back = persist::decode(&app.snapshot()).unwrap();
+    let t = back.workspaces.current().active_tab();
+    assert_eq!(t.kind, PageKind::Web, "a restart retries rather than apologising");
+    assert!(t.url.contains("nonexistent-host.invalid"));
+}
+
+#[test]
+fn awkward_titles_survive_the_round_trip() {
+    let mut app = App::new();
+    app.settings.startup = Startup::RestoreSession;
+    let id = app.workspaces.current().active;
+    let title = "tabs\there, lines\nthere, back\\slash and émoji 🦀";
+    app.workspaces.set_location(id, title, "example.com", "https://example.com/?q=a\tb");
+    let back = persist::decode(&app.snapshot()).unwrap();
+    assert_eq!(back.workspaces.current().active_tab().title, title);
+    assert_eq!(back.workspaces.current().active_tab().url, "https://example.com/?q=a\tb");
+}
+
+#[test]
+fn a_newer_file_is_refused_so_it_is_not_overwritten() {
+    let text = format!("compact-state\t{}\ncurrent\t0\n", FORMAT_VERSION + 1);
+    assert_eq!(persist::decode(&text).err(), Some(LoadError::TooNew(FORMAT_VERSION + 1)));
+}
+
+#[test]
+fn garbage_is_reported_not_guessed_at() {
+    assert_eq!(persist::decode("").err(), Some(LoadError::NotState));
+    assert_eq!(persist::decode("{\"json\": true}").err(), Some(LoadError::NotState));
+    let truncated = "compact-state\t1\nworkspace\tPersonal\n";
+    assert!(matches!(persist::decode(truncated), Err(LoadError::Corrupt { line: 2, .. })));
+    let orphan = "compact-state\t1\ntab\tweb\tt\th\tu\n";
+    assert!(matches!(persist::decode(orphan), Err(LoadError::Corrupt { .. })));
+}
+
+#[test]
+fn unknown_records_and_out_of_range_indices_are_tolerated() {
+    let text = "compact-state\t1\nfrom-the-future\tx\ncurrent\t9\n\
+                workspace\tSolo\tall\t7\ntab\tweb\tA\ta.test\thttps://a.test\n\
+                workspace\tEmpty\tmuted\t0\n";
+    let app = persist::decode(text).unwrap();
+    assert_eq!(app.workspaces.spaces.len(), 2);
+    assert_eq!(app.workspaces.current, 1, "clamped");
+    assert_eq!(app.workspaces.spaces[0].active_tab().host, "a.test", "clamped");
+    assert_eq!(
+        app.workspaces.spaces[1].tabs[0].kind,
+        PageKind::NewTab,
+        "an empty workspace reopens on a new tab rather than breaking the never-empty rule"
+    );
+}
+
+#[test]
+fn boot_renders_an_internal_front_tab_instead_of_fetching_it() {
+    let mut app = App::fresh();
+    let fx = app.boot();
+    let active = app.workspaces.current().active;
+    assert!(
+        fx.iter().any(|e| matches!(e, Effect::RenderInternal(id, _) if *id == active)),
+        "{fx:?}"
+    );
+    assert!(!fx.iter().any(|e| matches!(e, Effect::Load(_, u) if u.starts_with("compact://"))));
+}
+
+#[test]
+fn boot_loads_a_web_front_tab_by_url() {
+    let mut app = App::new();
+    let active = app.workspaces.current().active;
+    let url = app.workspaces.current().active_tab().url.clone();
+    let fx = app.boot();
+    assert!(fx.contains(&Effect::Load(active, url)));
+    assert!(app.workspaces.current().active_tab().state.is_live());
+}

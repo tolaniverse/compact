@@ -17,7 +17,9 @@
 
 mod chrome;
 mod overlays;
+mod store;
 mod widgets;
 mod window;
 
+pub use store::{Opened, Store};
 pub use window::{preflight, Shell};

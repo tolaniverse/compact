@@ -6,6 +6,7 @@
 //! jumping to the end.
 
 use crate::page::{ErrorKind, PageKind};
+use crate::persist::SavedSpace;
 use crate::tab::{TabId, TabIdGen, TabMeta, TabState};
 use crate::theme::{Rgba, WORKSPACE_DOTS};
 
@@ -119,6 +120,69 @@ impl WorkspaceSet {
             .collect();
 
         Self { spaces, current: 0, ids, clock }
+    }
+
+    /// What a first launch opens on: the canvas's three workspaces, each with
+    /// nothing but a new-tab page. The names stay because `⌘1–3`, the switcher
+    /// and the notification settings are all built around three workspaces,
+    /// and there is no way to create one yet.
+    pub fn fresh() -> Self {
+        let spaces: Vec<SavedSpace> = ["Personal", "Work", "Research"]
+            .into_iter()
+            .map(|name| SavedSpace {
+                name: name.to_string(),
+                active: 0,
+                tabs: vec![crate::persist::new_tab_entry()],
+            })
+            .collect();
+        Self::from_saved(&spaces, 0)
+    }
+
+    /// Rebuild from a state file. Every tab gets a new id and comes back
+    /// `Cold`; out-of-range indices are clamped rather than trusted.
+    ///
+    /// `spaces` must be non-empty and every workspace must hold a tab — the
+    /// decoder guarantees both.
+    pub fn from_saved(spaces: &[SavedSpace], current: usize) -> Self {
+        let mut ids = TabIdGen::new();
+        let mut clock = 0u64;
+        let spaces: Vec<Workspace> = spaces
+            .iter()
+            .enumerate()
+            .map(|(wi, s)| {
+                let mut tabs: Vec<TabMeta> = s
+                    .tabs
+                    .iter()
+                    .map(|saved| {
+                        clock += 1;
+                        let mut t = if saved.kind.is_internal() {
+                            TabMeta::internal(ids.next(), saved.kind)
+                        } else {
+                            TabMeta::new(ids.next(), saved.title.clone(), saved.host.clone())
+                        };
+                        if !saved.kind.is_internal() {
+                            t.url = saved.url.clone();
+                        }
+                        t.last_active = clock;
+                        t
+                    })
+                    .collect();
+                let active_idx = s.active.min(tabs.len() - 1);
+                // The tab that was in front is the most recently used one, so
+                // the eviction policy ranks it accordingly on the first pass.
+                clock += 1;
+                tabs[active_idx].last_active = clock;
+                Workspace {
+                    name: s.name.clone(),
+                    dot: WORKSPACE_DOTS[wi % WORKSPACE_DOTS.len()],
+                    active: tabs[active_idx].id,
+                    tabs,
+                    unread: 0,
+                }
+            })
+            .collect();
+        let current = current.min(spaces.len() - 1);
+        Self { spaces, current, ids, clock }
     }
 
     pub fn current(&self) -> &Workspace {

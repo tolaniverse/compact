@@ -81,6 +81,13 @@ impl Bookmarks {
         id
     }
 
+    /// Add a bookmark read back from a state file.
+    pub(crate) fn insert(&mut self, title: String, host: String, tint: Rgba) {
+        if !self.contains_host(&host) {
+            self.add(title, host, tint);
+        }
+    }
+
     pub fn remove(&mut self, id: BookmarkId) {
         self.items.retain(|b| b.id != id);
     }

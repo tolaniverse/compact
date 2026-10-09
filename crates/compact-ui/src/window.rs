@@ -68,9 +68,29 @@ struct Inner {
     /// with background workspaces prewarmed, notifying on it would greet the
     /// user with a toast per tab at launch. Only later changes are events.
     titled: std::collections::HashSet<TabId>,
+    /// Where state is saved. `None` in demo mode, which must never overwrite
+    /// a real profile with the canvas's sample tabs.
+    store: Option<crate::store::Store>,
+    /// Set after a failed save has been reported, so a full disk produces one
+    /// line on stderr rather than one a second.
+    save_failed: bool,
 }
 
 impl Inner {
+    /// Save state if it changed. Failures are reported once, then retried
+    /// quietly every tick until one succeeds.
+    fn save(&mut self) {
+        let Some(store) = self.store.as_mut() else { return };
+        match store.save(&self.app) {
+            Ok(_) => self.save_failed = false,
+            Err(e) if !self.save_failed => {
+                eprintln!("compact: could not save to {}: {e}", store.path().display());
+                self.save_failed = true;
+            }
+            Err(_) => {}
+        }
+    }
+
     fn now_ms(&self) -> u64 {
         self.started.elapsed().as_millis() as u64
     }
@@ -375,7 +395,14 @@ pub struct Shell;
 
 impl Shell {
     /// Build and run Compact. Returns when the app terminates.
-    pub fn run(mtm: MainThreadMarker) -> Result<(), String> {
+    ///
+    /// `app` is the state to open on; `store`, when present, is where changes
+    /// to it are saved.
+    pub fn run(
+        mtm: MainThreadMarker,
+        app: App,
+        store: Option<crate::store::Store>,
+    ) -> Result<(), String> {
         let ns_app = NSApplication::sharedApplication(mtm);
         ns_app.setActivationPolicy(NSApplicationActivationPolicy::Regular);
         install_menu(mtm, &ns_app);
@@ -450,7 +477,7 @@ impl Shell {
             content.addSubview(&v);
         }
 
-        let mut app = App::new();
+        let mut app = app;
         // Size the live-set budget to what this machine actually has free.
         if let Some(mem) = compact_mem::guard::SystemMemory::read() {
             app.budget = LiveBudget::from_available(mem.available);
@@ -473,6 +500,8 @@ impl Shell {
             buttons_shown: false,
             pending_focus: None,
             titled: std::collections::HashSet::new(),
+            store,
+            save_failed: false,
         }));
         inner.borrow_mut().self_ref = Rc::downgrade(&inner);
 
@@ -484,16 +513,10 @@ impl Shell {
             std::mem::forget(monitor);
         }
 
-        // Load the workspace's active tab, then let the budget fill the rest.
+        // Put the front tab on screen, then let the budget fill the rest.
         {
             let mut i = inner.borrow_mut();
-            let active = i.app.workspaces.current().active;
-            let url = i.app.workspaces.current().active_tab().url.clone();
-            i.app
-                .workspaces
-                .set_state(active, compact_core::tab::TabState::Live);
-            let mut fx = vec![Effect::Load(active, url)];
-            fx.extend(i.app.reconcile());
+            let fx = i.app.boot();
             i.settle(fx);
         }
 
@@ -501,6 +524,7 @@ impl Shell {
         install_bridge(&inner);
         install_ticker(&inner);
         install_load_poll(&inner);
+        install_save_on_quit(&inner);
 
         window.makeKeyAndOrderFront(None);
         ns_app.activate();
@@ -829,18 +853,20 @@ fn install_ticker(inner: &Rc<RefCell<Inner>>) {
                 .locate(id)
                 .map(|(_, t)| t.title.clone())
                 .unwrap_or_default();
+            let url = i.engine.url(id).unwrap_or_default();
             if cur == title {
+                // Same title, different page — a link within a site, or an
+                // in-page route change. Not news, but it is where the tab now
+                // is, and what a restart should reopen.
+                let moved = !url.is_empty()
+                    && i.app.workspaces.locate(id).is_some_and(|(_, t)| t.url != url);
+                if moved {
+                    let host = host_of(&url);
+                    i.app.adopt_title(id, &title, &host, &url);
+                }
                 continue;
             }
-            let url = i.engine.url(id).unwrap_or_default();
-            let host = url
-                .split("://")
-                .nth(1)
-                .unwrap_or(&url)
-                .split('/')
-                .next()
-                .unwrap_or("")
-                .to_string();
+            let host = host_of(&url);
             i.app.adopt_title(id, &title, &host, &url);
             dirty = true;
 
@@ -875,6 +901,11 @@ fn install_ticker(inner: &Rc<RefCell<Inner>>) {
         if dirty {
             i.render();
         }
+
+        // Saving rides the housekeeping tick: at most a second of changes is
+        // at risk if the process dies, and an unchanged snapshot costs one
+        // string comparison.
+        i.save();
     });
     unsafe {
         let t = NSTimer::scheduledTimerWithTimeInterval_repeats_block(1.0, true, &block);
@@ -995,4 +1026,40 @@ const WINDOW_BUTTONS: [NSWindowButton; 3] = [
 enum Focus {
     Address,
     Palette,
+}
+
+/// The host part of a URL, for the address bar and bookmarks.
+fn host_of(url: &str) -> String {
+    url.split("://")
+        .nth(1)
+        .unwrap_or(url)
+        .split('/')
+        .next()
+        .unwrap_or("")
+        .to_string()
+}
+
+/// Write state one last time as the app quits.
+///
+/// ⌘Q ends in `-[NSApplication terminate:]`, which exits the process without
+/// unwinding Rust, so nothing in a destructor would run. The will-terminate
+/// notification is the last point at which the run loop is still ours.
+fn install_save_on_quit(inner: &Rc<RefCell<Inner>>) {
+    let me = inner.clone();
+    let block = RcBlock::new(move |_n: NonNull<objc2_foundation::NSNotification>| {
+        if let Ok(mut i) = me.try_borrow_mut() {
+            i.save();
+        }
+    });
+    unsafe {
+        let center = objc2_foundation::NSNotificationCenter::defaultCenter();
+        let observer = center.addObserverForName_object_queue_usingBlock(
+            Some(objc2_app_kit::NSApplicationWillTerminateNotification),
+            None,
+            None,
+            &block,
+        );
+        // The observer lives as long as the process.
+        std::mem::forget(observer);
+    }
 }

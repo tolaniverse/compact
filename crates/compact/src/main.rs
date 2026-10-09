@@ -17,9 +17,30 @@ fn main() {
             eprintln!("compact: running with a reduced live-tab budget — {warning}");
         }
 
+        // `--demo` opens on the canvas's sample workspaces and saves nothing,
+        // so screenshots never touch — or leak — a real profile.
+        let demo = std::env::args().skip(1).any(|a| a == "--demo");
+        let (app, store) = if demo {
+            (compact_core::App::new(), None)
+        } else {
+            match compact_ui::Store::default_dir() {
+                Some(dir) => {
+                    let opened = compact_ui::Store::open(&dir);
+                    if let Some(w) = opened.warning {
+                        eprintln!("compact: {w}");
+                    }
+                    (opened.app, Some(opened.store))
+                }
+                None => {
+                    eprintln!("compact: no home directory; this session will not be saved");
+                    (compact_core::App::fresh(), None)
+                }
+            }
+        };
+
         let mtm = objc2::MainThreadMarker::new()
             .expect("main() is the main thread");
-        if let Err(e) = compact_ui::Shell::run(mtm) {
+        if let Err(e) = compact_ui::Shell::run(mtm, app, store) {
             eprintln!("compact: {e}");
             std::process::exit(1);
         }
