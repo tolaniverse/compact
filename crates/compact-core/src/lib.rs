@@ -136,8 +136,16 @@ pub fn parse_address(input: &str) -> Option<Target> {
                 && !hostname.ends_with('.')));
 
     if has_scheme || looks_like_host {
+        // Loopback gets plain HTTP: a dev server on your own machine almost
+        // never has a certificate, and that is where agents' sites run.
+        let loopback = hostname == "localhost"
+            || hostname.ends_with(".localhost")
+            || hostname == "127.0.0.1"
+            || head.starts_with("[::1]");
         let url = if has_scheme {
             raw.to_string()
+        } else if loopback {
+            format!("http://{stripped}")
         } else {
             format!("https://{stripped}")
         };

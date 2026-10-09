@@ -9,20 +9,35 @@
 //! Hibernation uses `WKWebView.interactionState`, an opaque property-list
 //! object carrying the back/forward list and scroll position. M0 measured these
 //! at 640 B – 3.9 KB with scroll restored exactly, against a 50 KB gate.
+//!
+//! **Profiles.** Your tabs share one configuration and WebKit's default,
+//! persistent website data store. Each agent workspace gets a configuration
+//! of its own with a separate, non-persistent store, so an agent never sees
+//! your cookies and two agents never see each other's. Agent pages also carry
+//! the capture hook ([`crate::capture`]) and are inspectable from Safari's
+//! Web Inspector.
 
+use std::cell::Cell;
 use std::collections::HashMap;
 
+use block2::RcBlock;
 use objc2::rc::Retained;
-use objc2::runtime::AnyObject;
-use objc2::{msg_send, MainThreadMarker, MainThreadOnly};
-use objc2_app_kit::NSView;
-use objc2_core_foundation::CGRect;
-use objc2_foundation::{NSData, NSKeyedArchiver, NSString, NSURLRequest, NSURL};
-use objc2_web_kit::{WKWebView, WKWebViewConfiguration};
+use objc2::runtime::{AnyObject, ProtocolObject};
+use objc2::{msg_send, sel, ClassType, MainThreadMarker, MainThreadOnly};
+use objc2_app_kit::{NSImage, NSView};
+use objc2_core_foundation::{CGPoint, CGRect, CGSize};
+use objc2_foundation::{NSData, NSDictionary, NSError, NSKeyedArchiver, NSString, NSURLRequest, NSURL};
+use objc2_web_kit::{
+    WKContentWorld, WKSnapshotConfiguration, WKUserScript, WKUserScriptInjectionTime, WKWebView,
+    WKWebViewConfiguration, WKWebsiteDataStore,
+};
 
 use crate::bridge::{Bridge, HANDLER_NAME};
+use crate::capture::{Capture, CAPTURE_HANDLER, CAPTURE_SCRIPT};
+use crate::inspect;
 
 use compact_core::tab::TabId;
+use compact_core::workspace::Profile;
 
 use crate::{EngineError, Hibernation, Result, TabEngine};
 
@@ -66,6 +81,15 @@ pub struct WebKitEngine {
     urls: HashMap<TabId, String>,
     /// Which tab is currently visible; others are detached from the hierarchy.
     visible: Option<TabId>,
+    /// Whose data store each tab's view is built with. Absent means yours.
+    profiles: HashMap<TabId, Profile>,
+    /// One configuration per agent profile, made on first use and dropped
+    /// with that profile's last tab.
+    agent_configs: HashMap<String, Retained<WKWebViewConfiguration>>,
+    /// Console and network activity of agent tabs while they are live.
+    captures: HashMap<TabId, Capture>,
+    /// Where inspection scripts run, out of the page's reach.
+    world: Retained<WKContentWorld>,
 }
 
 impl WebKitEngine {
@@ -91,7 +115,50 @@ impl WebKitEngine {
             sessions: HashMap::new(),
             urls: HashMap::new(),
             visible: None,
+            profiles: HashMap::new(),
+            agent_configs: HashMap::new(),
+            captures: HashMap::new(),
+            world: unsafe { WKContentWorld::worldWithName(&NSString::from_str(inspect::WORLD), mtm) },
         }
+    }
+
+    /// Say whose data store `id` uses. Must be called before the tab's view
+    /// is first built; a live view keeps the store it was built with.
+    pub fn set_profile(&mut self, id: TabId, profile: Profile) {
+        match profile {
+            Profile::Personal => {
+                self.profiles.remove(&id);
+            }
+            p => {
+                self.profiles.insert(id, p);
+            }
+        }
+    }
+
+    /// The configuration for an agent profile, built on first use.
+    fn agent_config(&mut self, key: &str) -> Retained<WKWebViewConfiguration> {
+        if let Some(c) = self.agent_configs.get(key) {
+            return c.clone();
+        }
+        let mtm = self.mtm;
+        let config = unsafe { WKWebViewConfiguration::new(mtm) };
+        unsafe {
+            config.setWebsiteDataStore(&WKWebsiteDataStore::nonPersistentDataStore(mtm));
+            let ucc = config.userContentController();
+            let handler = ProtocolObject::from_ref(&*self.bridge);
+            // Internal pages render in agent workspaces too.
+            ucc.addScriptMessageHandler_name(handler, &NSString::from_str(HANDLER_NAME));
+            ucc.addScriptMessageHandler_name(handler, &NSString::from_str(CAPTURE_HANDLER));
+            let script = WKUserScript::initWithSource_injectionTime_forMainFrameOnly(
+                WKUserScript::alloc(mtm),
+                &NSString::from_str(CAPTURE_SCRIPT),
+                WKUserScriptInjectionTime::AtDocumentStart,
+                true,
+            );
+            ucc.addUserScript(&script);
+        }
+        self.agent_configs.insert(key.to_string(), config.clone());
+        config
     }
 
     /// Build an engine with its own detached container, for headless
@@ -113,10 +180,26 @@ impl WebKitEngine {
     /// Create a web view sized to the container and mount it.
     fn make_view(&mut self, id: TabId) -> Retained<WKWebView> {
         let frame = self.container.bounds();
+        let agent = match self.profiles.get(&id).cloned() {
+            Some(Profile::Agent(key)) => Some(self.agent_config(&key)),
+            _ => None,
+        };
+        let config = agent.as_ref().unwrap_or(&self.config);
         let view = unsafe {
             let v = WKWebView::alloc(self.mtm);
-            WKWebView::initWithFrame_configuration(v, frame, &self.config)
+            WKWebView::initWithFrame_configuration(v, frame, config)
         };
+        if agent.is_some() {
+            self.captures.entry(id).or_default();
+            // So Safari's Web Inspector can attach for anything the capture
+            // hook cannot see. The property arrived in macOS 13.3.
+            unsafe {
+                let can: bool = msg_send![&*view, respondsToSelector: sel!(setInspectable:)];
+                if can {
+                    view.setInspectable(true);
+                }
+            }
+        }
         unsafe {
             view.setNavigationDelegate(Some(objc2::runtime::ProtocolObject::from_ref(
                 &*self.bridge,
@@ -267,6 +350,166 @@ impl WebKitEngine {
     }
 }
 
+// ---- eyes: what agent tools read -------------------------------------------
+
+impl WebKitEngine {
+    /// Record a line from an agent page's capture hook.
+    pub fn ingest(&mut self, view_addr: usize, line: &str) {
+        let Some(id) = self.tab_of(view_addr) else { return };
+        // Only tabs built with an agent profile have a buffer, so a line that
+        // somehow arrives from one of your tabs is dropped.
+        if let Some(c) = self.captures.get_mut(&id) {
+            c.ingest(line);
+        }
+    }
+
+    /// A live agent tab's captured console and network activity.
+    pub fn capture(&self, id: TabId) -> Option<&Capture> {
+        self.captures.get(&id)
+    }
+
+    /// The page as an outline of roles, names and element refs. See
+    /// [`inspect::SNAPSHOT_SCRIPT`].
+    pub fn snapshot(&self, id: TabId, done: impl FnOnce(std::result::Result<String, String>) + 'static) {
+        match self.views.get(&id) {
+            Some(v) => self.eval_in_world(v, &inspect::snapshot_script(), done),
+            None => done(Err(format!("{id} is not live"))),
+        }
+    }
+
+    /// A PNG of the visible page, or of one element scrolled into view.
+    ///
+    /// `target` is a ref from [`Self::snapshot`] (`e12`) or a CSS selector.
+    pub fn screenshot(
+        &self,
+        id: TabId,
+        target: Option<&str>,
+        done: impl FnOnce(std::result::Result<Vec<u8>, String>) + 'static,
+    ) {
+        let Some(view) = self.views.get(&id).cloned() else {
+            done(Err(format!("{id} is not live")));
+            return;
+        };
+        let mtm = self.mtm;
+        let Some(target) = target else {
+            take_snapshot(mtm, &view, None, done);
+            return;
+        };
+        let v = view.clone();
+        let target = target.to_string();
+        self.eval_in_world(&view, &inspect::locate_script(&target), move |r| match r {
+            Err(e) => done(Err(e)),
+            Ok(s) if s == inspect::NO_MATCH => {
+                done(Err(format!("no element matches {target}")))
+            }
+            Ok(s) => {
+                let b = v.bounds();
+                match inspect::parse_rect(&s, (b.size.width, b.size.height)) {
+                    Some(rect) => take_snapshot(mtm, &v, Some(rect), done),
+                    None => done(Err("the element has no visible area".into())),
+                }
+            }
+        });
+    }
+
+    /// Run `js` in Compact's own content world and hand back its string
+    /// result. Anything other than a string is an error, by design: the
+    /// scripts are ours, and a different type means something went wrong.
+    fn eval_in_world(
+        &self,
+        view: &WKWebView,
+        js: &str,
+        done: impl FnOnce(std::result::Result<String, String>) + 'static,
+    ) {
+        let done = Cell::new(Some(done));
+        let block = RcBlock::new(move |res: *mut AnyObject, err: *mut NSError| {
+            let Some(done) = done.take() else { return };
+            if let Some(err) = unsafe { err.as_ref() } {
+                done(Err(js_error_text(err)));
+                return;
+            }
+            match unsafe { res.as_ref() } {
+                Some(obj) if is_string(obj) => {
+                    let s: &NSString = unsafe { &*(obj as *const AnyObject as *const NSString) };
+                    done(Ok(s.to_string()));
+                }
+                _ => done(Err("the script returned no text".into())),
+            }
+        });
+        unsafe {
+            view.evaluateJavaScript_inFrame_inContentWorld_completionHandler(
+                &NSString::from_str(js),
+                None,
+                &self.world,
+                Some(&block),
+            );
+        }
+    }
+}
+
+fn take_snapshot(
+    mtm: MainThreadMarker,
+    view: &WKWebView,
+    rect: Option<(f64, f64, f64, f64)>,
+    done: impl FnOnce(std::result::Result<Vec<u8>, String>) + 'static,
+) {
+    let config = unsafe { WKSnapshotConfiguration::new(mtm) };
+    if let Some((x, y, w, h)) = rect {
+        unsafe { config.setRect(CGRect::new(CGPoint::new(x, y), CGSize::new(w, h))) };
+    }
+    let done = Cell::new(Some(done));
+    let block = RcBlock::new(move |img: *mut NSImage, err: *mut NSError| {
+        let Some(done) = done.take() else { return };
+        if let Some(err) = unsafe { err.as_ref() } {
+            done(Err(err.localizedDescription().to_string()));
+            return;
+        }
+        match unsafe { img.as_ref() }.and_then(png_of) {
+            Some(png) => done(Ok(png)),
+            None => done(Err("the snapshot could not be encoded".into())),
+        }
+    });
+    unsafe { view.takeSnapshotWithConfiguration_completionHandler(Some(&config), &block) };
+}
+
+/// Encode an image as PNG, by way of its TIFF representation, which avoids
+/// pulling Core Graphics image types into the engine.
+fn png_of(img: &NSImage) -> Option<Vec<u8>> {
+    unsafe {
+        let tiff: Option<Retained<NSData>> = msg_send![img, TIFFRepresentation];
+        let tiff = tiff?;
+        let cls = objc2::runtime::AnyClass::get(c"NSBitmapImageRep")?;
+        let rep: Option<Retained<AnyObject>> = msg_send![cls, imageRepWithData: &*tiff];
+        let rep = rep?;
+        let props = NSDictionary::<NSString, AnyObject>::new();
+        // NSBitmapImageFileTypePNG.
+        let png: Option<Retained<NSData>> =
+            msg_send![&*rep, representationUsingType: 4usize, properties: &*props];
+        png.map(|d| d.to_vec())
+    }
+}
+
+/// What a failed script evaluation says, preferring the JavaScript exception
+/// message over WebKit's generic "A JavaScript exception occurred".
+fn js_error_text(err: &NSError) -> String {
+    unsafe {
+        let info = err.userInfo();
+        let key = NSString::from_str("WKJavaScriptExceptionMessage");
+        let msg: Option<Retained<AnyObject>> = msg_send![&*info, objectForKey: &*key];
+        match msg {
+            Some(m) if is_string(&m) => {
+                let s: &NSString = &*(Retained::as_ptr(&m) as *const NSString);
+                s.to_string()
+            }
+            _ => err.localizedDescription().to_string(),
+        }
+    }
+}
+
+fn is_string(obj: &AnyObject) -> bool {
+    unsafe { msg_send![obj, isKindOfClass: NSString::class()] }
+}
+
 impl TabEngine for WebKitEngine {
     fn capability(&self) -> Hibernation {
         Hibernation::Blob
@@ -288,6 +531,9 @@ impl TabEngine for WebKitEngine {
 
     fn hibernate(&mut self, id: TabId) -> Result<usize> {
         let view = self.views.remove(&id).ok_or(EngineError::UnknownTab(id))?;
+        // Captured activity is not part of the session: it costs memory, and
+        // a hibernated tab is supposed to cost almost none.
+        self.captures.remove(&id);
 
         let url = self
             .url(id)
@@ -341,8 +587,17 @@ impl TabEngine for WebKitEngine {
         }
         self.sessions.remove(&id);
         self.urls.remove(&id);
+        self.captures.remove(&id);
         if self.visible == Some(id) {
             self.visible = None;
+        }
+        // An agent profile's store goes with its last tab, taking the
+        // agent's cookies with it.
+        if let Some(Profile::Agent(key)) = self.profiles.remove(&id) {
+            let in_use = self.profiles.values().any(|p| *p == Profile::Agent(key.clone()));
+            if !in_use {
+                self.agent_configs.remove(&key);
+            }
         }
     }
 

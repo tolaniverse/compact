@@ -106,6 +106,12 @@ impl Inner {
         // Direction, plus whether the destination was already painted.
         let mut slide: Option<(i8, bool)> = None;
         for e in effects {
+            // Any of these may build the tab's web view, and a view keeps the
+            // data store it was built with — so the engine has to know whose
+            // tab it is first.
+            if let Effect::Load(id, _) | Effect::Restore(id) | Effect::RenderInternal(id, _) = &e {
+                self.engine.set_profile(*id, self.app.workspaces.profile_of(*id));
+            }
             match e {
                 Effect::Load(id, url) => {
                     let _ = self.engine.load(id, &url);
@@ -312,9 +318,9 @@ impl Inner {
         let trace = std::env::var_os("COMPACT_TRACE").is_some();
         for event in compact_engine::drain_events() {
             match event {
-                EngineEvent::Message { view, body } => {
+                EngineEvent::Message { view, body, origin } => {
                     if trace {
-                        eprintln!("[bridge] {body:?}");
+                        eprintln!("[bridge] {body:?} from {origin:?}");
                     }
                     // Only the visible tab can be clicked, and honouring a
                     // message from any other view would let a background page
@@ -323,12 +329,26 @@ impl Inner {
                     if self.engine.tab_of(view) != Some(active) {
                         continue;
                     }
+                    // And only Compact's own pages may speak. The handler is
+                    // reachable from every page, so without this any site you
+                    // visit could change settings, rebind keys or navigate.
+                    // Both checks, because each has a gap the other covers:
+                    // the tab model learns of a navigation a poll late, and
+                    // an origin alone says nothing about which tab it is.
+                    if !self.internal(active) || !compact_engine::is_internal_origin(&origin) {
+                        if trace {
+                            eprintln!("[bridge] refused: not an internal page");
+                        }
+                        continue;
+                    }
                     let Some(msg) = compact_core::bridge::parse(&body) else {
                         continue;
                     };
                     let fx = self.app.on_page_message(msg);
                     self.settle(fx);
                 }
+                // Recorded, never acted on: the page wrote it.
+                EngineEvent::Capture { view, line } => self.engine.ingest(view, &line),
                 EngineEvent::Failed { view, code } => {
                     let Some(id) = self.engine.tab_of(view) else { continue };
                     // A failure reported against a tab already showing one of

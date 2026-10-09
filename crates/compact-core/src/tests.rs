@@ -437,13 +437,16 @@ fn budget_is_global_across_workspaces() {
 // ---- address parsing -----------------------------------------------------
 
 #[test]
-fn bare_hosts_become_https_urls() {
+fn bare_hosts_become_https_urls_and_loopback_stays_http() {
     for (input, url, display) in [
         ("example.com", "https://example.com", "example.com"),
         ("docs.internal/spec", "https://docs.internal/spec", "docs.internal/spec"),
         ("https://a.test/x?y=1", "https://a.test/x?y=1", "a.test/x?y=1"),
         ("http://a.test", "http://a.test", "a.test"),
-        ("localhost:8080", "https://localhost:8080", "localhost:8080"),
+        ("localhost:8080", "http://localhost:8080", "localhost:8080"),
+        ("127.0.0.1:3000/app", "http://127.0.0.1:3000/app", "127.0.0.1:3000/app"),
+        ("app.localhost:5173", "http://app.localhost:5173", "app.localhost:5173"),
+        ("https://localhost:8443", "https://localhost:8443", "localhost:8443"),
     ] {
         let t = crate::parse_address(input).expect(input);
         assert_eq!(t.url, url, "input {input}");
@@ -1862,4 +1865,19 @@ fn internal_pages_draw_a_robot_for_agent_workspaces() {
     let page = crate::html::new_tab(&app, 0);
     assert!(page.contains("Claude Code&#39;s workspace") || page.contains("Claude Code's workspace"));
     assert_eq!(page.matches(r#"aria-label="Agent workspace""#).count(), 1);
+}
+
+#[test]
+fn each_agent_workspace_has_its_own_profile() {
+    use crate::workspace::Profile;
+    let mut app = App::fresh();
+    let a = app.open_agent_workspace("Claude Code", "~/a");
+    let b = app.open_agent_workspace("Muse", "~/a");
+    let mine = app.workspaces.spaces[0].active;
+    let pa = app.workspaces.profile_of(app.workspaces.spaces[a].active);
+    let pb = app.workspaces.profile_of(app.workspaces.spaces[b].active);
+    assert_eq!(app.workspaces.profile_of(mine), Profile::Personal);
+    assert!(matches!(pa, Profile::Agent(_)));
+    assert_ne!(pa, pb, "agents never share cookies");
+    assert_eq!(app.workspaces.profile_of(TabId(9999)), Profile::Personal, "unknown tabs get no agent's store");
 }

@@ -41,6 +41,26 @@ pub struct AgentInfo {
     pub control: Control,
 }
 
+impl AgentInfo {
+    /// The key the engine's website data store is kept under. Stable across a
+    /// reconnect, so an agent finds the logins it made earlier in the session.
+    pub fn profile_key(&self) -> String {
+        format!("{}\u{1f}{}", self.client, self.project)
+    }
+}
+
+/// Whose cookies and storage a tab uses.
+///
+/// Every agent workspace has its own, so an agent never sees what you are
+/// logged in to, and two agents never see each other's.
+#[derive(Clone, PartialEq, Eq, Hash, Debug)]
+pub enum Profile {
+    /// Yours: the default, persistent website data store.
+    Personal,
+    /// An agent workspace's, by [`AgentInfo::profile_key`].
+    Agent(String),
+}
+
 /// `"Claude Code's workspace"` — an agent workspace is named after its agent.
 pub fn agent_workspace_name(client: &str) -> String {
     let client = client.trim();
@@ -435,6 +455,13 @@ impl WorkspaceSet {
             self.current -= 1;
         }
         Some(gone.tabs.iter().map(|t| t.id).collect())
+    }
+
+    /// Which website data store `id` must be built with.
+    pub fn profile_of(&self, id: TabId) -> Profile {
+        self.locate(id)
+            .and_then(|(i, _)| self.spaces[i].agent.as_ref())
+            .map_or(Profile::Personal, |a| Profile::Agent(a.profile_key()))
     }
 
     /// Every tab that belongs to an agent workspace — what the policy ranks

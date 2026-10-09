@@ -12,13 +12,16 @@
 use compact_core::tab::TabId;
 use std::fmt;
 
+pub mod capture;
+pub mod inspect;
+
 #[cfg(target_os = "macos")]
 pub mod bridge;
 #[cfg(target_os = "macos")]
 pub mod macos;
 
 #[cfg(target_os = "macos")]
-pub use bridge::{drain_events, on_event, EngineEvent};
+pub use bridge::{drain_events, is_internal_origin, on_event, EngineEvent};
 #[cfg(target_os = "macos")]
 pub use macos::WebKitEngine;
 
