@@ -296,6 +296,106 @@ impl App {
     }
 }
 
+// ---- the conversation ----------------------------------------------------------
+
+use crate::agent::AgentError;
+
+impl App {
+    /// The comment `id` in workspace `ws`, for its agent to act on.
+    fn agent_comment(&mut self, ws: usize, id: CommentId) -> Result<(&mut Comment, String), AgentError> {
+        let a = self
+            .workspaces
+            .spaces
+            .get_mut(ws)
+            .and_then(|w| w.agent.as_mut())
+            .ok_or(AgentError::NotAgentWorkspace)?;
+        let client = a.client.clone();
+        let c = a.comments.iter_mut().find(|c| c.id == id).ok_or(AgentError::NoSuchComment(id))?;
+        Ok((c, client))
+    }
+
+    /// The tab you would want to see a comment on: one showing its page,
+    /// preferring the one under review.
+    fn tab_for_page(&self, ws: usize, url: &str) -> Option<TabId> {
+        let w = self.workspaces.spaces.get(ws)?;
+        let page = page_key(url);
+        let on_page: Vec<TabId> = w.tabs.iter().filter(|t| page_key(&t.url) == page).map(|t| t.id).collect();
+        on_page.iter().copied().find(|t| Some(*t) == self.review).or_else(|| on_page.first().copied())
+    }
+
+    /// Workspace `ws`'s agent answers in a comment's thread. You hear about
+    /// it, since a question was asked of it or it is asking one back.
+    pub fn agent_reply_comment(&mut self, ws: usize, id: CommentId, body: &str) -> Result<(), AgentError> {
+        let body = body.trim();
+        if body.is_empty() {
+            return Err(AgentError::Refused("a reply needs a body".into()));
+        }
+        let (c, client) = self.agent_comment(ws, id)?;
+        c.replies.push(Remark { from_agent: true, body: body.to_string() });
+        let url = c.anchor.url.clone();
+        let tab = self.tab_for_page(ws, &url).unwrap_or(self.workspaces.spaces[ws].active);
+        let now = self.clock;
+        self.post_activity(ws, format!("{client} replied on {}: {body}", id.label()), client, tab, now);
+        Ok(())
+    }
+
+    /// Workspace `ws`'s agent says comment `id` is dealt with. It waits for
+    /// you to look: the page reloads so the change shows, and its pin pulses.
+    pub fn mark_addressed(&mut self, ws: usize, id: CommentId, note: Option<&str>) -> Result<Vec<Effect>, AgentError> {
+        let (c, client) = self.agent_comment(ws, id)?;
+        if c.state == CommentState::Resolved {
+            return Err(AgentError::Refused(format!("{} is already resolved", id.label())));
+        }
+        c.state = CommentState::Addressed;
+        let note = note.map(str::trim).filter(|n| !n.is_empty());
+        if let Some(n) = note {
+            c.replies.push(Remark { from_agent: true, body: n.to_string() });
+        }
+        let url = c.anchor.url.clone();
+        let mut fx = Vec::new();
+        let tab = self.tab_for_page(ws, &url);
+        if let Some(t) = tab {
+            if self.workspaces.locate(t).is_some_and(|(_, m)| m.state.is_live()) {
+                fx.push(Effect::Reload(t));
+            }
+        }
+        let tab = tab.unwrap_or(self.workspaces.spaces[ws].active);
+        let text = match note {
+            Some(n) => format!("{client} addressed {}: {n}", id.label()),
+            None => format!("{client} addressed {} — take a look", id.label()),
+        };
+        let now = self.clock;
+        self.post_activity(ws, text, client, tab, now);
+        Ok(fx)
+    }
+
+    /// You are happy with comment `id`. Its pin goes away.
+    pub fn resolve_comment(&mut self, id: CommentId) -> bool {
+        match self.comment_mut(id) {
+            Some(c) if c.state != CommentState::Resolved => {
+                c.state = CommentState::Resolved;
+                true
+            }
+            _ => false,
+        }
+    }
+
+    /// You answer in comment `id`'s thread. That reopens it and puts it back
+    /// on the agent's list, so its next `wait_for_feedback` hands the whole
+    /// thread over again.
+    pub fn reply_comment(&mut self, id: CommentId, body: &str) -> bool {
+        let body = body.trim();
+        if body.is_empty() {
+            return false;
+        }
+        let Some(c) = self.comment_mut(id) else { return false };
+        c.replies.push(Remark { from_agent: false, body: body.to_string() });
+        c.state = CommentState::Open;
+        c.delivered = false;
+        true
+    }
+}
+
 /// A URL with its fragment dropped: `#section` does not make a new page.
 pub fn page_key(url: &str) -> &str {
     url.split('#').next().unwrap_or(url).trim_end_matches('/')

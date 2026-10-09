@@ -431,9 +431,9 @@ impl WebKitEngine {
     /// Show or hide the review overlay on `id`, with `pins_json` as its pins.
     /// A tab that is not live, or whose page has no overlay, is left alone:
     /// the overlay asks to be switched on again when its page loads.
-    pub fn set_review(&self, id: TabId, on: bool, pins_json: &str) {
+    pub fn set_review(&self, id: TabId, on: bool, pins_json: &str, agent: &str) {
         if let Some(v) = self.views.get(&id) {
-            self.eval_in_world(v, &crate::review::set_script(on, pins_json), |_| {});
+            self.eval_in_world(v, &crate::review::set_script(on, pins_json, agent), |_| {});
         }
     }
 

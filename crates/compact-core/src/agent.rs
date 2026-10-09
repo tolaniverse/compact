@@ -50,6 +50,7 @@ pub enum AgentError {
     TooManyTabs,
     /// The site needs your approval first.
     NeedsApproval { host: String },
+    NoSuchComment(crate::review::CommentId),
     Refused(String),
 }
 
@@ -67,6 +68,9 @@ impl core::fmt::Display for AgentError {
             }
             AgentError::NeedsApproval { host } => {
                 write!(f, "the user has not allowed {host}; they were asked in Compact")
+            }
+            AgentError::NoSuchComment(id) => {
+                write!(f, "no comment {} in this workspace; call get_comments", id.label())
             }
             AgentError::Refused(why) => write!(f, "{why}"),
         }

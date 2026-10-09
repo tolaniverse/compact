@@ -18,6 +18,8 @@
 //! - `{"type":"comment", kind, body, url, selector, text, role, data, rect,
 //!   viewport, scroll, styles}` when you send one. The overlay hides itself
 //!   first, so the crop the shell takes shows the page and not the overlay.
+//! - `{"type":"reply", id, body}` and `{"type":"resolve", id}` from a pin's
+//!   thread.
 //! - `{"type":"exit"}` on Escape with nothing open.
 //!
 //! The shell drives it with [`set_script`].
@@ -26,10 +28,13 @@
 pub const REVIEW_HANDLER: &str = "compactReview";
 
 /// The script to switch the overlay on or off. `pins` is a JSON array of
-/// `{id, n, state, kind, body, selector, text, role, rect, viewport, scroll}`.
-pub fn set_script(on: bool, pins_json: &str) -> String {
+/// `{id, n, state, kind, body, selector, text, role, rect, viewport, scroll,
+/// replies: [{from: "agent"|"you", body}]}`; `agent` names who the comments
+/// are for.
+pub fn set_script(on: bool, pins_json: &str, agent: &str) -> String {
     format!(
-        "(() => {{ if (!window.__compactReview) return 'absent'; window.__compactReview.set({on}, {pins_json}); return 'ok'; }})()"
+        "(() => {{ if (!window.__compactReview) return 'absent'; window.__compactReview.set({on}, {pins_json}, {agent}); return 'ok'; }})()",
+        agent = crate::inspect::js_string(agent)
     )
 }
 
@@ -68,10 +73,31 @@ pub const REVIEW_SCRIPT: &str = r#"(() => {
     .card button.send { background: #7c6cf0; color: #fff; border: 0; border-radius: 6px; padding: 5px 12px; font-size: 12px; cursor: pointer; }
     .card .body { font-size: 13px; line-height: 1.45; white-space: pre-wrap; }
     .card .meta { font-size: 11px; color: #7a7a86; margin-top: 6px; }
+    .card .msg { margin-bottom: 9px; } .card .who { font-size: 11px; color: #9a9aa6; margin-bottom: 2px; }
+    .card .msg.agent .who { color: #a99cf7; }
+    .card .thread { max-height: 220px; overflow: auto; margin-bottom: 4px; }
+    .card .state { font-size: 11px; padding: 2px 7px; border-radius: 5px; background: rgba(255,255,255,.08); color: #c9c9d3; }
+    .card .state.addressed { background: rgba(52,195,143,.18); color: #6ee7b7; }
+    .card button.ghost { background: transparent; color: #c9c9d3; border: 1px solid rgba(255,255,255,.14); border-radius: 6px;
+      padding: 5px 10px; font-size: 12px; cursor: pointer; }
+    .card .actions { display: flex; gap: 6px; }
+    .panel { position: fixed; right: 14px; top: 64px; width: 260px; max-height: 50vh; overflow: auto; pointer-events: auto;
+      background: rgba(23,23,28,.94); color: #ececf1; border: 1px solid rgba(255,255,255,.12); border-radius: 10px;
+      box-shadow: 0 8px 28px rgba(0,0,0,.4); font-size: 12px; }
+    .panel .ph { padding: 9px 12px; display: flex; justify-content: space-between; color: #9a9aa6; cursor: pointer; }
+    .panel .row { padding: 7px 12px; border-top: 1px solid rgba(255,255,255,.06); cursor: pointer; display: flex; gap: 8px; }
+    .panel .row:hover { background: rgba(255,255,255,.05); }
+    .panel .n { flex: none; width: 18px; height: 18px; border-radius: 9px; background: #7c6cf0; color: #fff;
+      display: flex; align-items: center; justify-content: center; font-size: 10px; font-weight: 700; }
+    .panel .n.add { background: #34c38f; } .panel .n.question { background: #3b82f6; } .panel .n.lost { background: #6b6b75; }
+    .panel .t { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; flex: 1; }
+    .panel .s { flex: none; color: #6ee7b7; font-size: 10px; }
+    .panel.folded .row { display: none; }
   `;
 
   let on = false, host = null, root = null, layer, box, tag, region, pinsEl;
   let hovered = null, narrower = [], composer = null, card = null, press = null, pins = [], focusPin = -1, laid = 0;
+  let agent = 'the agent', panel = null, folded = false;
 
   const ROLE = { A: 'link', BUTTON: 'button', SELECT: 'combobox', TEXTAREA: 'textbox', IMG: 'img', NAV: 'navigation',
     MAIN: 'main', HEADER: 'banner', FOOTER: 'contentinfo', ASIDE: 'complementary', FORM: 'form', UL: 'list', OL: 'list',
@@ -120,7 +146,7 @@ pub const REVIEW_SCRIPT: &str = r#"(() => {
   };
 
   const drawBox = () => {
-    if (!hovered || composer) { box.style.display = 'none'; return; }
+    if (!hovered || composer || card) { box.style.display = 'none'; return; }
     const r = hovered.getBoundingClientRect();
     Object.assign(box.style, { display: 'block', left: r.x - 2 + 'px', top: r.y - 2 + 'px', width: r.width + 4 + 'px', height: r.height + 4 + 'px' });
     const name = textOf(hovered);
@@ -180,25 +206,77 @@ pub const REVIEW_SCRIPT: &str = r#"(() => {
     requestAnimationFrame(() => requestAnimationFrame(() => post(m)));
   };
 
+  // A pin's thread: what you said, what came back, and what to do next.
+  const el = (tag, cls, text) => { const e = document.createElement(tag); if (cls) e.className = cls; if (text != null) e.textContent = text; return e; };
   const showCard = (p, at) => {
     closeCard();
-    card = document.createElement('div');
-    card.className = 'card';
-    const b = document.createElement('div'); b.className = 'body'; b.textContent = p.body;
-    const meta = document.createElement('div'); meta.className = 'meta';
-    meta.textContent = `${p.id} · ${p.kind} · ${p.state}${p.lost ? ' · element not found' : ''}`;
-    card.append(b, meta);
+    card = el('div', 'card');
+    const head = el('div', 'head');
+    head.append(el('span', null, `${p.id} · ${p.kind}${p.lost ? ' · element not found' : ''}`), el('span', null, ''));
+    head.lastChild.style.marginLeft = 'auto';
+    head.append(el('span', 'state ' + p.state, p.state === 'addressed' ? `${agent} says done` : p.state));
+    const thread = el('div', 'thread');
+    const msg = (who, body, mine) => { const m = el('div', 'msg' + (mine ? '' : ' agent')); m.append(el('div', 'who', who), el('div', 'body', body)); thread.append(m); };
+    msg('You', p.body, true);
+    for (const r of p.replies || []) msg(r.from === 'agent' ? agent : 'You', r.body, r.from !== 'agent');
+    const ta = el('textarea');
+    ta.placeholder = p.state === 'addressed' ? 'Not quite? Say what is still wrong…' : 'Reply…';
+    ta.style.minHeight = '52px';
+    const foot = el('div', 'foot');
+    const acts = el('div', 'actions');
+    const resolve = el('button', 'ghost', 'Resolve');
+    const reply = el('button', 'send', p.state === 'addressed' ? 'Reopen' : 'Reply');
+    resolve.addEventListener('click', e => { e.stopPropagation(); post({ type: 'resolve', id: p.id }); closeCard(); });
+    reply.addEventListener('click', e => { e.stopPropagation(); sendReply(); });
+    acts.append(resolve, reply);
+    foot.append(el('span', null, '⌘↩ reply · esc close'), acts);
+    card.append(head, thread, ta, foot);
+    card.dataset.id = p.id;
     root.appendChild(card);
     place(card, at);
+    thread.scrollTop = thread.scrollHeight;
+    // Ready to answer: opening a thread is usually to say something in it.
+    setTimeout(() => ta.focus(), 0);
+  };
+  const sendReply = () => {
+    if (!card || !card.dataset.id) return;
+    const body = card.querySelector('textarea').value.trim();
+    if (!body) return;
+    post({ type: 'reply', id: card.dataset.id, body });
+    closeCard();
+  };
+
+  // Every open thread on this page, in one place.
+  const drawPanel = () => {
+    if (!panel) return;
+    panel.textContent = '';
+    panel.style.display = on && pins.length ? '' : 'none';
+    panel.classList.toggle('folded', folded);
+    const h = el('div', 'ph');
+    const waiting = pins.filter(p => p.state === 'addressed').length;
+    h.append(el('span', null, `Comments · ${pins.length}${waiting ? ` · ${waiting} to check` : ''}`), el('span', null, folded ? '▸' : '▾'));
+    h.addEventListener('click', e => { e.stopPropagation(); folded = !folded; drawPanel(); });
+    panel.append(h);
+    pins.forEach((p, i) => {
+      const r = el('div', 'row');
+      r.append(el('span', `n ${p.kind}${p.lost ? ' lost' : ''}`, p.n), el('span', 't', p.body));
+      if (p.state === 'addressed') r.append(el('span', 's', 'check'));
+      r.addEventListener('click', e => { e.stopPropagation(); focusPin = i - 1; jump(1); });
+      panel.append(r);
+    });
   };
 
   // Where a pin's element is now: selector, then text and role, then where
   // it was. A miss is flagged, never silently moved onto something else.
+  //
+  // The selector wins even when the text has changed: the commonest reason
+  // for new text is that the agent fixed exactly what the comment asked
+  // for, and losing the pin then would hide the change you came to check.
   const locate = p => {
     if (p.selector) {
       try {
         const el = document.querySelector(p.selector);
-        if (el && (!p.text || textOf(el) === p.text || !textOf(el))) return { el };
+        if (el) return { el };
       } catch (_) {}
       if (p.text) {
         const all = document.querySelectorAll('a,button,input,select,textarea,img,h1,h2,h3,h4,h5,h6,li,p,span,div,label,section');
@@ -241,8 +319,8 @@ pub const REVIEW_SCRIPT: &str = r#"(() => {
     host = document.createElement('compact-review');
     host.style.cssText = 'all: initial; position: fixed; inset: 0; z-index: 2147483647; pointer-events: none;';
     root = host.attachShadow({ mode: 'closed' });
-    root.innerHTML = `<style>${CSS}</style><div class="layer"></div><div class="region"></div><div class="box"><span class="tag"></span></div><div class="pins"></div>`;
-    [layer, region, box, pinsEl] = ['.layer', '.region', '.box', '.pins'].map(s => root.querySelector(s));
+    root.innerHTML = `<style>${CSS}</style><div class="layer"></div><div class="region"></div><div class="box"><span class="tag"></span></div><div class="pins"></div><div class="panel"></div>`;
+    [layer, region, box, pinsEl, panel] = ['.layer', '.region', '.box', '.pins', '.panel'].map(s => root.querySelector(s));
     tag = root.querySelector('.tag');
     layer.addEventListener('mousemove', e => {
       if (press) {
@@ -277,6 +355,13 @@ pub const REVIEW_SCRIPT: &str = r#"(() => {
   addEventListener('keydown', e => {
     if (!on) return;
     const stop = () => { e.preventDefault(); e.stopImmediatePropagation(); };
+    const typing = root && root.activeElement && root.activeElement.tagName === 'TEXTAREA';
+    if (!composer && card && typing) {
+      if (e.key === 'Escape') { stop(); closeCard(); }
+      else if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) { stop(); sendReply(); }
+      else e.stopImmediatePropagation();
+      return;
+    }
     if (composer) {
       if (e.key === 'Escape') { stop(); closeCard(); }
       else if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) { stop(); send(); }
@@ -297,14 +382,15 @@ pub const REVIEW_SCRIPT: &str = r#"(() => {
   setInterval(() => { if (on && !composer) layout(); }, 700);
 
   window.__compactReview = {
-    set(next, list) {
+    set(next, list, who) {
       pins = Array.isArray(list) ? list : [];
+      if (who) agent = who;
       if (next && !host) mount();
       on = !!next;
       if (!host) return;
       host.style.display = on ? '' : 'none';
       if (!on) { closeCard(); hovered = null; focusPin = -1; }
-      layout(); drawBox();
+      layout(); drawBox(); drawPanel();
     },
   };
   post({ type: 'ready' });
@@ -316,8 +402,8 @@ mod tests {
 
     #[test]
     fn the_switch_script_reports_whether_the_overlay_was_there() {
-        let s = set_script(true, "[]");
-        assert!(s.contains("set(true, [])"));
+        let s = set_script(true, "[]", "Claude \"Code\"");
+        assert!(s.contains(r#"set(true, [], "Claude \"Code\"")"#), "{s}");
         assert!(s.contains("'absent'"));
     }
 

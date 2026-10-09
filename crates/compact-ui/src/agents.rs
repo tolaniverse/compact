@@ -530,6 +530,24 @@ fn crop_path(name: &str) -> Option<std::path::PathBuf> {
     ok.then(|| crops_dir().map(|d| d.join(name))).flatten()
 }
 
+/// Switch the overlay on `tab` on or off, with its current pins.
+pub(super) fn show_review(app: &compact_core::App, engine: &compact_engine::WebKitEngine, tab: TabId, on: bool) {
+    let agent = app
+        .workspaces
+        .locate(tab)
+        .and_then(|(ws, _)| app.workspaces.spaces[ws].agent.as_ref())
+        .map(|a| a.client.clone())
+        .unwrap_or_else(|| "the agent".into());
+    engine.set_review(tab, on, &pins_json(app, tab), &agent);
+}
+
+/// Bring the overlay under review up to date after its comments changed.
+fn refresh_review(app: &compact_core::App, engine: &compact_engine::WebKitEngine) {
+    if let Some(tab) = app.review {
+        show_review(app, engine, tab, true);
+    }
+}
+
 /// The pins the overlay draws on `tab`, as the JSON its `set` takes.
 pub(super) fn pins_json(app: &compact_core::App, tab: TabId) -> String {
     let pins: Vec<Value> = app
@@ -542,6 +560,7 @@ pub(super) fn pins_json(app: &compact_core::App, tab: TabId) -> String {
                 "id": c.id.label(), "n": i + 1, "state": c.state.slug(), "kind": c.kind.slug(), "body": c.body,
                 "selector": a.selector, "text": a.text, "role": a.role,
                 "rect": a.rect, "viewport": a.viewport, "scroll": a.scroll,
+                "replies": c.replies.iter().map(|r| json!({"from": if r.from_agent { "agent" } else { "you" }, "body": r.body})).collect::<Vec<_>>(),
             })
         })
         .collect();
@@ -609,7 +628,25 @@ impl Inner {
         match s("type").as_str() {
             "ready" => {
                 if self.app.review == Some(tab) {
-                    self.engine.set_review(tab, true, &pins_json(&self.app, tab));
+                    show_review(&self.app, &self.engine, tab, true);
+                }
+            }
+            "resolve" | "reply" => {
+                // Only a comment on this tab's own workspace, whatever id the
+                // message names.
+                let Some(id) = compact_core::review::CommentId::parse(&s("id")) else { return };
+                let Some((ws, _)) = self.app.workspaces.locate(tab) else { return };
+                if !self.app.comments_in(ws, None).iter().any(|c| c.id == id) {
+                    return;
+                }
+                let changed = if s("type") == "resolve" {
+                    self.app.resolve_comment(id)
+                } else {
+                    self.app.reply_comment(id, &s("body"))
+                };
+                if changed {
+                    show_review(&self.app, &self.engine, tab, self.app.review == Some(tab));
+                    self.render();
                 }
             }
             "exit" => {
@@ -633,7 +670,7 @@ impl Inner {
                 let kind = CommentKind::from_slug(&s("kind")).unwrap_or(CommentKind::Change);
                 let Some(id) = self.app.add_comment(tab, kind, &s("body"), anchor) else {
                     // Not one we can keep; show the overlay again as it was.
-                    self.engine.set_review(tab, self.app.review == Some(tab), &pins_json(&self.app, tab));
+                    show_review(&self.app, &self.engine, tab, self.app.review == Some(tab));
                     return;
                 };
                 self.render();
@@ -659,8 +696,7 @@ impl Inner {
                             }
                         }
                         let on = i.app.review == Some(tab);
-                        let pins = pins_json(&i.app, tab);
-                        i.engine.set_review(tab, on, &pins);
+                        show_review(&i.app, &i.engine, tab, on);
                         i.render();
                     });
                 });
@@ -713,6 +749,32 @@ impl Inner {
                     self.agent_reply(conn, id, comments_reply(&got, None));
                 } else if let Some(h) = self.agents.as_mut() {
                     h.feedback.push(FeedbackWait { conn, id, session: session.clone(), until: self.app.clock + secs * 1000 });
+                }
+            }
+            tools::REPLY_TO_COMMENT | tools::MARK_ADDRESSED => {
+                let text = |k: &str| args.get(k).and_then(Value::as_str);
+                let Some(cid) = text("comment").and_then(compact_core::review::CommentId::parse) else {
+                    self.agent_reply(conn, id, err("comment is required, like \"c3\""));
+                    return true;
+                };
+                let result = if tool == tools::REPLY_TO_COMMENT {
+                    self.app.agent_reply_comment(ws, cid, text("body").unwrap_or("")).map(|()| Vec::new())
+                } else {
+                    self.app.mark_addressed(ws, cid, text("note"))
+                };
+                match result {
+                    Ok(fx) => {
+                        let reloaded = !fx.is_empty();
+                        // A reloaded page asks for its pins itself once it is
+                        // back; one that was not needs them pushed.
+                        self.settle(fx);
+                        if !reloaded {
+                            refresh_review(&self.app, &self.engine);
+                        }
+                        let state = self.app.comments_in(ws, None).iter().find(|c| c.id == cid).map(|c| c.state.slug());
+                        self.agent_reply(conn, id, Reply::Ok(json!({"comment": cid.label(), "state": state, "reloaded": reloaded})));
+                    }
+                    Err(e) => self.agent_reply(conn, id, err(e)),
                 }
             }
             _ => return false,

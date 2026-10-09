@@ -2185,3 +2185,61 @@ fn reading_comments_marks_them_seen() {
     app.mark_delivered(ws);
     assert!(!app.has_undelivered(ws));
 }
+
+#[test]
+fn the_review_loop_runs_comment_to_fix_to_resolved() {
+    let (mut app, ws, tab) = reviewing();
+    let id = app.add_comment(tab, CommentKind::Change, "Cut off on mobile", anchor_on("http://localhost:3000/pricing")).unwrap();
+    app.take_undelivered(ws);
+
+    let fx = app.mark_addressed(ws, id, Some("Wrapped the label")).unwrap();
+    assert_eq!(fx, vec![Effect::Reload(tab)], "the page reloads so the fix shows");
+    let c = app.comments_in(ws, None)[0].clone();
+    assert_eq!(c.state, CommentState::Addressed);
+    assert_eq!(c.replies[0].body, "Wrapped the label");
+    assert!(c.replies[0].from_agent);
+    assert!(activity(&app).last().unwrap().text.contains("addressed c1"), "you hear about it");
+    assert_eq!(app.pins_for(tab).len(), 1, "still pinned until you look");
+
+    assert!(app.resolve_comment(id));
+    assert!(!app.resolve_comment(id), "once");
+    assert!(app.pins_for(tab).is_empty());
+    assert!(app.mark_addressed(ws, id, None).is_err(), "a resolved comment stays resolved");
+}
+
+#[test]
+fn replying_reopens_the_thread_for_the_agent() {
+    let (mut app, ws, tab) = reviewing();
+    let id = app.add_comment(tab, CommentKind::Change, "Too small", anchor_on("http://localhost:3000/pricing")).unwrap();
+    app.take_undelivered(ws);
+    app.mark_addressed(ws, id, Some("Bigger now")).unwrap();
+    assert!(!app.has_undelivered(ws));
+
+    assert!(app.reply_comment(id, "Still too small on mobile"));
+    let again = app.take_undelivered(ws);
+    assert_eq!(again.len(), 1, "back on the agent's list");
+    assert_eq!(again[0].state, CommentState::Open);
+    let bodies: Vec<_> = again[0].replies.iter().map(|r| (r.from_agent, r.body.as_str())).collect();
+    assert_eq!(bodies, [(true, "Bigger now"), (false, "Still too small on mobile")], "the whole thread");
+    assert!(!app.reply_comment(id, "  "), "empty replies are ignored");
+}
+
+#[test]
+fn an_agent_answers_questions_in_the_thread() {
+    let (mut app, ws, tab) = reviewing();
+    let id = app.add_comment(tab, CommentKind::Question, "Why purple?", anchor_on("http://localhost:3000/pricing")).unwrap();
+    app.agent_reply_comment(ws, id, "It is the brand colour.").unwrap();
+    assert_eq!(app.comments_in(ws, None)[0].replies[0].body, "It is the brand colour.");
+    assert!(activity(&app).last().unwrap().text.contains("It is the brand colour."));
+}
+
+#[test]
+fn an_agent_can_only_touch_its_own_comments() {
+    let (mut app, ws, tab) = reviewing();
+    let id = app.add_comment(tab, CommentKind::Change, "x", anchor_on("http://localhost:3000/pricing")).unwrap();
+    let other = app.open_agent_workspace("Muse", "~/site");
+    assert_eq!(app.mark_addressed(other, id, None).unwrap_err(), crate::agent::AgentError::NoSuchComment(id));
+    assert!(app.agent_reply_comment(other, id, "hi").is_err());
+    assert!(app.mark_addressed(0, id, None).is_err(), "nor can your workspace");
+    assert!(app.agent_reply_comment(ws, CommentId(99), "hi").is_err());
+}

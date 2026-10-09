@@ -141,10 +141,7 @@ impl Inner {
                     let _ = self.engine.load_html(id, &html, &base);
                 }
                 Effect::Reload(id) => self.engine.reload(id),
-                Effect::SetReview(id, on) => {
-                    let pins = agents::pins_json(&self.app, id);
-                    self.engine.set_review(id, on, &pins);
-                }
+                Effect::SetReview(id, on) => agents::show_review(&self.app, &self.engine, id, on),
                 // Deferred: the render that follows is what makes these
                 // visible, and focusing a hidden field does nothing.
                 Effect::FocusAddressField => self.pending_focus = Some(Focus::Address),
