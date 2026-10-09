@@ -145,6 +145,9 @@ pub fn encode(app: &App) -> String {
                         &floats(&n.scroll),
                         &n.styles,
                         n.crop.as_deref().unwrap_or(""),
+                        &n.framework,
+                        &n.component,
+                        &n.source,
                     ],
                 );
                 for r in &c.replies {
@@ -407,6 +410,11 @@ pub fn decode(text: &str) -> Result<App, LoadError> {
                         scroll: parse_floats(&f[13]).unwrap_or_default(),
                         styles: f[14].clone(),
                         crop: Some(f[15].clone()).filter(|c| !c.is_empty()),
+                        // Added after the record itself; files from before
+                        // simply lack them.
+                        framework: f.get(16).cloned().unwrap_or_default(),
+                        component: f.get(17).cloned().unwrap_or_default(),
+                        source: f.get(18).cloned().unwrap_or_default(),
                     },
                     replies: Vec::new(),
                 });

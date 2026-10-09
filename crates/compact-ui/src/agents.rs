@@ -572,7 +572,13 @@ pub(super) fn pins_json(app: &compact_core::App, tab: TabId) -> String {
 fn comment_json(c: &Comment, image: Option<usize>) -> Value {
     let a = &c.anchor;
     let element = (!a.selector.is_empty()).then(|| {
-        json!({"selector": a.selector, "text": a.text, "role": a.role, "data": a.data, "styles": a.styles})
+        let mut e = json!({"selector": a.selector, "text": a.text, "role": a.role, "data": a.data, "styles": a.styles});
+        if !a.component.is_empty() || !a.source.is_empty() {
+            e["component"] = json!(a.component);
+            e["source"] = json!(a.source);
+            e["source_reported_by"] = json!(format!("the page's {} dev build", a.framework));
+        }
+        e
     });
     json!({
         "id": c.id.label(),
@@ -666,6 +672,9 @@ impl Inner {
                     scroll: floats("scroll").try_into().unwrap_or_default(),
                     styles: s("styles"),
                     crop: None,
+                    framework: s("framework"),
+                    component: s("component"),
+                    source: s("source"),
                 };
                 let kind = CommentKind::from_slug(&s("kind")).unwrap_or(CommentKind::Change);
                 let Some(id) = self.app.add_comment(tab, kind, &s("body"), anchor) else {

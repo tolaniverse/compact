@@ -99,6 +99,14 @@ pub struct Anchor {
     pub styles: String,
     /// The cropped screenshot's file name, once it has been taken.
     pub crop: Option<String>,
+    /// Which framework reported the element's source: `react`, `vue`,
+    /// `svelte`, `angular`, or empty when none did.
+    pub framework: String,
+    /// The component that rendered it, as the framework names it.
+    pub component: String,
+    /// `file:line:column` where it was written, as far as the dev build
+    /// knows. The page's own claim; a lead to check, not a fact.
+    pub source: String,
 }
 
 /// One message in a comment's thread after the first.

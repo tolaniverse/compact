@@ -137,6 +137,30 @@ pub const REVIEW_SCRIPT: &str = r#"(() => {
       .map(k => `${k}: ${s.getPropertyValue(k)}`).join('; ');
   };
   const rectOf = r => [r.x, r.y, r.width, r.height].map(v => Math.round(v * 10) / 10);
+  // Ask the page-world hook (see source.rs) which component made `el`. It
+  // answers synchronously, in an attribute; what it says is the page's word,
+  // so it is checked and cut to size here.
+  const sourceOf = el => {
+    let raw = null;
+    try {
+      el.setAttribute('data-compact-probe', '');
+      document.dispatchEvent(new Event('compact-source-probe'));
+      raw = el.getAttribute('data-compact-source');
+    } catch (_) {}
+    el.removeAttribute('data-compact-probe');
+    el.removeAttribute('data-compact-source');
+    let v = null;
+    try { v = raw ? JSON.parse(raw) : null; } catch (_) {}
+    if (!v || typeof v !== 'object') return { framework: '', component: '', source: '' };
+    const str = (x, n) => typeof x === 'string' ? x.slice(0, n) : '';
+    const num = x => Number.isInteger(x) && x >= 0 && x < 1e7 ? x : null;
+    const file = str(v.file, 300), line = num(v.line), col = num(v.column), via = str(v.via, 80);
+    return {
+      framework: str(v.framework, 20),
+      component: str(v.component, 80),
+      source: file ? file + (line != null ? ':' + line + (col != null ? ':' + col : '') : '') + (via ? ` (where <${via}> is rendered)` : '') : '',
+    };
+  };
 
   const pick = (x, y) => {
     layer.style.pointerEvents = 'none';
@@ -173,11 +197,16 @@ pub const REVIEW_SCRIPT: &str = r#"(() => {
     card.className = 'card';
     const kinds = target.el ? ['change', 'question'] : ['add'];
     card.innerHTML = `<div class="head">${kinds.map(k => `<button class="kind" data-k="${k}">${k[0].toUpperCase() + k.slice(1)}</button>`).join('')}
-      <span style="margin-left:auto"></span></div><textarea></textarea>
+      <span style="margin-left:auto;max-width:170px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis"></span></div><textarea></textarea>
       <div class="foot"><span>⌘↩ send · esc cancel</span><button class="send">Send</button></div>`;
     const ta = card.querySelector('textarea');
     ta.placeholder = target.el ? 'What should change?' : 'What belongs here?';
-    card.querySelector('.head span').textContent = target.el ? roleOf(target.el) : 'new area';
+    if (target.el) target.src = sourceOf(target.el);
+    const src = target.src || {};
+    card.querySelector('.head span').textContent = target.el
+      ? [src.component || roleOf(target.el), src.source && src.source.split('/').pop()].filter(Boolean).join(' · ')
+      : 'new area';
+    if (src.source) card.querySelector('.head span').title = src.source;
     const setKind = k => { composer.kind = k; card.querySelectorAll('.kind').forEach(b => b.classList.toggle('on', b.dataset.k === k)); };
     card.querySelectorAll('.kind').forEach(b => b.addEventListener('click', e => { e.stopPropagation(); setKind(b.dataset.k); ta.focus(); }));
     card.querySelector('.send').addEventListener('click', e => { e.stopPropagation(); send(); });
@@ -195,8 +224,8 @@ pub const REVIEW_SCRIPT: &str = r#"(() => {
     const t = composer;
     const r = t.el ? t.el.getBoundingClientRect() : t.rect;
     const m = { type: 'comment', kind: t.kind, body, url: location.href, rect: rectOf(r), viewport: [innerWidth, innerHeight],
-      scroll: [scrollX, scrollY], selector: '', text: '', role: '', data: '', styles: '' };
-    if (t.el) Object.assign(m, { selector: selectorOf(t.el), text: textOf(t.el), role: roleOf(t.el), data: dataOf(t.el), styles: stylesOf(t.el) });
+      scroll: [scrollX, scrollY], selector: '', text: '', role: '', data: '', styles: '', framework: '', component: '', source: '' };
+    if (t.el) Object.assign(m, { selector: selectorOf(t.el), text: textOf(t.el), role: roleOf(t.el), data: dataOf(t.el), styles: stylesOf(t.el) }, t.src || {});
     closeCard();
     hovered = null;
     // Out of the crop: the shell photographs the page as soon as this

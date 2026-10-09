@@ -2127,6 +2127,9 @@ fn comments_survive_a_restart_with_their_anchors() {
     let mut a = anchor_on("http://localhost:3000/pricing");
     a.data = "data-testid=cta".into();
     a.styles = "font-size: 18px; overflow: hidden".into();
+    a.framework = "react".into();
+    a.component = "PricingCard".into();
+    a.source = "/src/Pricing.tsx:42:7".into();
     let id = app.add_comment(tab, CommentKind::Question, "Why\tthis\ncolour?", a.clone()).unwrap();
     app.set_comment_crop(id, "c1.png");
     app.take_undelivered(ws);
@@ -2142,6 +2145,7 @@ fn comments_survive_a_restart_with_their_anchors() {
     assert_eq!(c.anchor.crop.as_deref(), Some("c1.png"));
     assert_eq!(c.anchor.rect, a.rect);
     assert_eq!(c.anchor.data, a.data);
+    assert_eq!((c.anchor.framework.as_str(), c.anchor.component.as_str(), c.anchor.source.as_str()), ("react", "PricingCard", "/src/Pricing.tsx:42:7"));
     assert_eq!(c.replies[0].body, "Brand purple.");
     assert_eq!(back.comment_seq, 1, "ids carry on from where they were");
 
@@ -2242,4 +2246,21 @@ fn an_agent_can_only_touch_its_own_comments() {
     assert!(app.agent_reply_comment(other, id, "hi").is_err());
     assert!(app.mark_addressed(0, id, None).is_err(), "nor can your workspace");
     assert!(app.agent_reply_comment(ws, CommentId(99), "hi").is_err());
+}
+
+#[test]
+fn comments_saved_before_source_lookup_still_open() {
+    let (mut app, ws, tab) = reviewing();
+    app.add_comment(tab, CommentKind::Change, "x", anchor_on("http://localhost:3000/pricing")).unwrap();
+    // Cut the three source fields off the end, as an older build wrote it.
+    let text: String = app
+        .snapshot()
+        .lines()
+        .map(|l| if l.starts_with("comment\t") { l.split('\t').take(16).collect::<Vec<_>>().join("\t") } else { l.to_string() })
+        .collect::<Vec<_>>()
+        .join("\n");
+    let back = persist::decode(&text).unwrap();
+    let c = &back.workspaces.spaces[ws].agent.as_ref().unwrap().comments[0];
+    assert_eq!(c.body, "x");
+    assert!(c.anchor.source.is_empty());
 }

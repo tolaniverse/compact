@@ -167,6 +167,15 @@ impl WebKitEngine {
                 &self.world,
             );
             ucc.addUserScript(&review);
+            // The page-world half of source lookup: it only answers the
+            // overlay's question about one element.
+            let hook = WKUserScript::initWithSource_injectionTime_forMainFrameOnly(
+                WKUserScript::alloc(mtm),
+                &NSString::from_str(crate::source::SOURCE_HOOK),
+                WKUserScriptInjectionTime::AtDocumentStart,
+                true,
+            );
+            ucc.addUserScript(&hook);
             ucc.addScriptMessageHandler_contentWorld_name(
                 handler,
                 &self.world,
