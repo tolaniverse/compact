@@ -1,0 +1,10 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1024" height="1024" viewBox="0 0 1024 1024">
+  <!-- Compact's icon, "Nest", glowing core: three workspaces packed into one
+       corner, brightening toward the smallest. The plate follows the macOS
+       icon grid: 824 px square with 185 px corners, centred in 1024. -->
+  <title>Compact</title>
+  <rect x="100" y="100" width="824" height="824" rx="185" fill="#211646"/>
+  <rect x="252" y="252" width="520" height="520" rx="76" fill="#35266F"/>
+  <rect x="252" y="432" width="340" height="340" rx="58" fill="#6352D6"/>
+  <rect x="252" y="592" width="180" height="180" rx="40" fill="#D6CDFF"/>
+</svg>

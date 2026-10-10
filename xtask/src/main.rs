@@ -38,6 +38,7 @@ fn main() -> ExitCode {
         "run" => run_task(rest),
         "spike" => spike_task(rest),
         "dist" => dist_task(),
+        "icon" => icon_task(),
         "test" => test_task(),
         "help" | "--help" | "-h" => {
             help();
@@ -71,6 +72,10 @@ fn help() {
 
   cargo xtask dist
         Release bundle, ready to ship.
+
+  cargo xtask icon
+        Rebuild assets/icon/Compact.icns from assets/icon/compact.svg.
+        Needs rsvg-convert (brew install librsvg); bundling does not.
 
   cargo xtask test
         Workspace tests.
@@ -125,7 +130,12 @@ fn parse_build_opts(args: &[String], default_bin: &str) -> BuildOpts {
     o
 }
 
-fn info_plist(bin: &str, name: &str) -> String {
+fn info_plist(bin: &str, name: &str, icon: bool) -> String {
+    let icon = if icon {
+        format!("  <key>CFBundleIconFile</key>          <string>{ICON_FILE}</string>\n")
+    } else {
+        String::new()
+    };
     format!(
         r#"<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -139,6 +149,7 @@ fn info_plist(bin: &str, name: &str) -> String {
   <key>CFBundleShortVersionString</key><string>{version}</string>
   <key>CFBundleVersion</key>           <string>{version}</string>
   <key>LSMinimumSystemVersion</key>    <string>{MIN_MACOS}</string>
+{icon}
   <key>NSHighResolutionCapable</key>   <true/>
   <!-- The window draws its own chrome, including the traffic lights. -->
   <key>NSPrincipalClass</key>          <string>NSApplication</string>
@@ -200,7 +211,14 @@ fn bundle_task(args: &[String]) -> Result<PathBuf, String> {
             "codesigning compact-mcp",
         )?;
     }
-    fs::write(app.join("Contents").join("Info.plist"), info_plist(&opts.bin, &app_name))
+    // The icon is committed already built, so bundling needs no image tools.
+    let icon = root.join("assets").join("icon").join(ICON_FILE);
+    let with_icon = opts.bin == "compact" && icon.exists();
+    if with_icon {
+        fs::copy(&icon, app.join("Contents").join("Resources").join(ICON_FILE))
+            .map_err(|e| format!("copying the icon: {e}"))?;
+    }
+    fs::write(app.join("Contents").join("Info.plist"), info_plist(&opts.bin, &app_name, with_icon))
         .map_err(|e| format!("writing Info.plist: {e}"))?;
     fs::write(app.join("Contents").join("PkgInfo"), "APPL????")
         .map_err(|e| format!("writing PkgInfo: {e}"))?;
@@ -241,6 +259,39 @@ fn spike_task(args: &[String]) -> Result<(), String> {
     let exe = app.join("Contents").join("MacOS").join("memspike");
     println!();
     run(Command::new(&exe).args(theirs), "running the spike")
+}
+
+/// The app icon's file name, in `assets/icon/` and in the bundle.
+const ICON_FILE: &str = "Compact.icns";
+
+/// Render the SVG master at every size macOS asks for and pack them into an
+/// `.icns`. The result is committed, so only changing the icon needs this.
+fn icon_task() -> Result<(), String> {
+    let root = workspace_root();
+    let dir = root.join("assets").join("icon");
+    let svg = dir.join("compact.svg");
+    let set = env::temp_dir().join(format!("compact-{}.iconset", std::process::id()));
+    let _ = fs::remove_dir_all(&set);
+    fs::create_dir_all(&set).map_err(|e| format!("creating {}: {e}", set.display()))?;
+    // The sizes and names iconutil expects: each size at 1x and 2x.
+    for size in [16u32, 32, 128, 256, 512] {
+        for (scale, suffix) in [(1, ""), (2, "@2x")] {
+            let px = size * scale;
+            let out = set.join(format!("icon_{size}x{size}{suffix}.png"));
+            run(
+                Command::new("rsvg-convert")
+                    .args(["-w", &px.to_string(), "-h", &px.to_string(), "-o"])
+                    .arg(&out)
+                    .arg(&svg),
+                &format!("rendering {px} px (is librsvg installed?)"),
+            )?;
+        }
+    }
+    let icns = dir.join(ICON_FILE);
+    run(Command::new("iconutil").args(["-c", "icns", "-o"]).arg(&icns).arg(&set), "packing the icon")?;
+    let _ = fs::remove_dir_all(&set);
+    println!("wrote {}", icns.display());
+    Ok(())
 }
 
 fn dist_task() -> Result<(), String> {
