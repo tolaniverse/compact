@@ -1,19 +1,24 @@
 //! The developer tools drawer (⌘⌥I) and the performance measurement behind
 //! it and the agent's `performance` tool.
 //!
-//! Like the review overlay, the drawer is page-level HTML in Compact's own
-//! content world and a closed shadow root: the page cannot see or drive it.
-//! Its console and network entries are not gathered here — they are the
-//! capture buffers ([`crate::capture`]) the agent already reads, pushed in by
-//! the shell — so you and the agent are always looking at the same thing.
-//! Performance is measured on demand from the page's own performance
-//! timeline by [`PERF_SCRIPT`].
+//! The drawer is a page of its own ([`devtools_page`]) in a web view of its
+//! own, docked beside the page it inspects: the page's view shrinks to make
+//! room, so the site reflows instead of being covered, as with any browser's
+//! inspector. It never runs inside the inspected page. Its console and
+//! network entries are the capture buffers ([`crate::capture`]) the agent
+//! already reads, pushed in by the shell, so you and the agent always look at
+//! the same thing; its performance numbers come from [`PERF_SCRIPT`], run in
+//! the inspected page on the drawer's behalf.
 //!
-//! It posts on the review handler ([`crate::review::REVIEW_HANDLER`]), which
-//! lives in the same world: `{"type":"devtools-ready"}` once per document,
-//! `{"type":"devtools-close"}`, `{"type":"devtools-dock", "dock"}` when you
-//! move it, and `{"type":"comment", …}` for "Send to
-//! agent", which becomes an ordinary review comment with the entry quoted.
+//! It posts on [`TOOLS_HANDLER`]: `{"type":"devtools-ready"}`,
+//! `{"type":"devtools-close"}`, `{"type":"devtools-dock", "dock"}`,
+//! `{"type":"measure"}`, and `{"type":"comment", …}` for "Send to agent",
+//! which the shell turns into an ordinary review comment on the inspected
+//! page, with the entry quoted.
+
+/// The message-handler name the drawer page posts to. Registered only on
+/// the drawer's own web view.
+pub const TOOLS_HANDLER: &str = "compactTools";
 
 /// Measure the page. A `callAsyncJavaScript` body that resolves to a JSON
 /// string. Metrics this engine does not report come back as `"unsupported"`
@@ -67,15 +72,21 @@ pub const SHOW_UI_SCRIPT: &str = r#"(() => {
   return 'shown';
 })()"#;
 
-/// Open or close the drawer docked at `dock` (`bottom`, `right` or `left`),
-/// flashing entry `seq` if given.
-pub fn open_script(on: bool, seq: Option<u64>, agent: &str, dock: &str) -> String {
+/// Point the drawer at a page and dock, flashing entry `seq` if given.
+pub fn open_script(seq: Option<u64>, agent: &str, dock: &str, page_url: &str) -> String {
     let seq = seq.map_or("null".to_string(), |s| s.to_string());
     format!(
-        "(() => {{ if (!window.__compactDevtools) return 'absent'; window.__compactDevtools.open({on}, {seq}, {agent}, {dock}); return 'ok'; }})()",
+        "(() => {{ if (!window.__compactDevtools) return 'absent'; window.__compactDevtools.open({seq}, {agent}, {dock}, {page}); return 'ok'; }})()",
         agent = crate::inspect::js_string(agent),
         dock = crate::inspect::js_string(dock),
+        page = crate::inspect::js_string(page_url),
     )
+}
+
+/// Hand the drawer a performance measurement it asked for (a JSON object,
+/// or `null` when it could not be taken).
+pub fn perf_script(json: &str) -> String {
+    format!("(() => {{ if (window.__compactDevtools) window.__compactDevtools.perf({json}); return 'ok'; }})()")
 }
 
 /// Hand the drawer entries it has not seen. `entries` is a JSON array.
@@ -85,22 +96,25 @@ pub fn add_script(entries_json: &str, reset: bool) -> String {
     )
 }
 
-/// The drawer, dormant until opened. `__PERF__` is replaced with
-/// [`PERF_SCRIPT`] by [`devtools_script`].
+/// The drawer's script; see [`devtools_page`].
 const DEVTOOLS_SCRIPT: &str = r##"(() => {
-  if (window.__compactDevtools || window.top !== window) return;
-  const post = m => { try { window.webkit.messageHandlers.compactReview.postMessage(JSON.stringify(m)); } catch (_) {} };
-  const measure = async () => { __PERF__ };
+  if (window.__compactDevtools) return;
+  const post = m => { try { window.webkit.messageHandlers.compactTools.postMessage(JSON.stringify(m)); } catch (_) {} };
+  // The page being inspected, as the shell last said.
+  let pageUrl = '', origin = '';
+  const local = u => origin ? String(u).replace(origin, '') : String(u);
+  // Measuring happens in the inspected page; the shell answers through perf().
+  let measured = null;
+  const measure = () => new Promise(done => { measured = done; post({ type: 'measure' }); });
   const CSS = `
-    :host { all: initial; }
+    html, body { margin: 0; height: 100%; overflow: hidden; background: #121216; }
     * { box-sizing: border-box; font-family: -apple-system, system-ui, sans-serif; }
-    .drawer { position: fixed; pointer-events: auto; background: #121216; color: #dcdce4; display: flex; flex-direction: column;
-      font-size: 12px; }
-    .drawer.bottom { left: 0; right: 0; bottom: 0; height: 38vh; min-height: 220px; border-top: 1px solid rgba(255,255,255,.12);
-      box-shadow: 0 -10px 30px rgba(0,0,0,.35); }
-    .drawer.right, .drawer.left { top: 0; bottom: 0; width: min(46vw, 560px); min-width: 340px; }
-    .drawer.right { right: 0; border-left: 1px solid rgba(255,255,255,.12); box-shadow: -10px 0 30px rgba(0,0,0,.35); }
-    .drawer.left { left: 0; border-right: 1px solid rgba(255,255,255,.12); box-shadow: 10px 0 30px rgba(0,0,0,.35); }
+    /* The view itself is sized and placed by the shell; the drawer fills it,
+       with an edge on the side that meets the page. */
+    .drawer { position: fixed; inset: 0; background: #121216; color: #dcdce4; display: flex; flex-direction: column; font-size: 12px; }
+    .drawer.bottom { border-top: 1px solid rgba(255,255,255,.14); }
+    .drawer.right { border-left: 1px solid rgba(255,255,255,.14); }
+    .drawer.left { border-right: 1px solid rgba(255,255,255,.14); }
     .bar { display: flex; flex-wrap: wrap; align-items: center; gap: 4px; padding: 6px 10px; border-bottom: 1px solid rgba(255,255,255,.08); flex: none; }
     .docks { display: flex; gap: 2px; margin-right: 6px; }
     .dock { width: 24px; height: 20px; padding: 0; border: 0; border-radius: 5px; background: transparent; cursor: pointer;
@@ -178,10 +192,9 @@ const DEVTOOLS_SCRIPT: &str = r##"(() => {
   const failed = e => e.status === 0 || e.status >= 400;
 
   const mount = () => {
-    host = document.createElement('compact-devtools');
-    host.style.cssText = 'all: initial; position: fixed; inset: 0; z-index: 2147483646; pointer-events: none;';
-    root = host.attachShadow({ mode: 'closed' });
-    root.innerHTML = `<style>${CSS}</style><div class="drawer"><div class="bar">
+    host = document.body;
+    root = document;
+    host.innerHTML = `<style>${CSS}</style><div class="drawer"><div class="bar">
       <button class="tab" data-v="console">Console<span class="badge c"></span></button>
       <button class="tab" data-v="network">Network<span class="badge n"></span></button>
       <button class="tab" data-v="performance">Performance</button>
@@ -202,11 +215,6 @@ const DEVTOOLS_SCRIPT: &str = r##"(() => {
       dock = b.dataset.d; place(); draw();
       post({ type: 'devtools-dock', dock });
     }));
-    // Keys typed into the drawer are the drawer's, not the page's: they reach
-    // the drawer's own fields first, then stop here before bubbling on to
-    // the page's listeners.
-    for (const t of ['keydown', 'keypress', 'keyup', 'input']) host.addEventListener(t, e => e.stopPropagation());
-    document.documentElement.appendChild(host);
   };
 
   const summary = e => e.type === 'console'
@@ -220,7 +228,7 @@ const DEVTOOLS_SCRIPT: &str = r##"(() => {
     const send = el('button', null, `Send to ${agent}`), cancel = el('button', 'ghost', 'Cancel');
     const go = () => {
       const body = ta.value.trim() || `Please look into this.`;
-      post({ type: 'comment', kind: 'change', body: `${body}\n\n${text}`, url: location.href, rect: [0, 0, 0, 0],
+      post({ type: 'comment', kind: 'change', body: `${body}\n\n${text}`, url: pageUrl, rect: [0, 0, 0, 0],
         viewport: [innerWidth, innerHeight], scroll: [scrollX, scrollY], selector: '', text: '', role: '', data: '', styles: '',
         framework: '', component: '', source: '' });
       sent.add(subject); composerFor = null; draw();
@@ -258,7 +266,7 @@ const DEVTOOLS_SCRIPT: &str = r##"(() => {
       r.dataset.seq = e.seq;
       const msg = el('div', 'msg', e.text + (opened.has(e.seq) && e.stack ? '\n' + e.stack : ''));
       msg.addEventListener('click', () => { opened.has(e.seq) ? opened.delete(e.seq) : opened.add(e.seq); draw(); });
-      r.append(el('span', 'seq', e.seq), msg, el('span', 'src', (e.source || '').replace(location.origin, '')));
+      r.append(el('span', 'seq', e.seq), msg, el('span', 'src', local(e.source || '')));
       const s = 'c' + e.seq;
       r.append(sendButton(s, summary(e)));
       after(r, s, summary(e));
@@ -275,7 +283,7 @@ const DEVTOOLS_SCRIPT: &str = r##"(() => {
     for (const e of rows) {
       const r = el('div', `row net${failed(e) ? ' failed' : ''}${e.seq === flashSeq ? ' flash' : ''}`);
       r.dataset.seq = e.seq;
-      const u = el('span', 'url', e.url.replace(location.origin, '')); u.title = e.url + (e.error ? '\n' + e.error : '');
+      const u = el('span', 'url', local(e.url));
       r.append(el('span', 'seq', e.seq), el('span', null, e.status || (e.error ? 'failed' : '—')), el('span', 'm', e.method), u,
         el('span', 'k', e.kind), el('span', null, e.ms != null ? e.ms + ' ms' : ''));
       u.title = `${e.method} ${e.url}${e.error ? '\n' + e.error : ''}`;
@@ -294,7 +302,7 @@ const DEVTOOLS_SCRIPT: &str = r##"(() => {
     const bar = el('div', 'perfbar');
     const again = el('button', null, perf ? 'Measure again' : 'Measuring…');
     again.addEventListener('click', runPerf);
-    bar.append(again, el('span', null, perf ? `for ${perf.url.replace(location.origin, '') || '/'}` : ''));
+    bar.append(again, el('span', null, perf ? `for ${local(perf.url) || '/'}` : ''));
     listEl.append(bar);
     if (!perf) return;
     const g = el('div', 'perf');
@@ -309,7 +317,7 @@ const DEVTOOLS_SCRIPT: &str = r##"(() => {
     if (perf.resources.slowest.length) {
       const s = el('div', 'slow');
       s.append(el('div', null, 'Slowest resources'));
-      for (const x of perf.resources.slowest) s.append(el('div', null, `${String(x.ms).padStart(6)} ms  ${x.kind.padEnd(10)} ${x.url.replace(location.origin, '')}`));
+      for (const x of perf.resources.slowest) s.append(el('div', null, `${String(x.ms).padStart(6)} ms  ${x.kind.padEnd(10)} ${local(x.url)}`));
       listEl.append(s);
     }
     const text = `Performance of ${perf.url}:\n` + JSON.stringify(perf, null, 2);
@@ -320,7 +328,7 @@ const DEVTOOLS_SCRIPT: &str = r##"(() => {
     if (composerFor === 'perf') listEl.append(composer('perf', text));
     else if (sent.has('perf')) listEl.append(el('div', 'sent', `Sent to ${agent}`));
   };
-  const runPerf = async () => { perf = null; if (view === 'performance') draw(); try { perf = JSON.parse(await measure()); } catch (_) { perf = null; } draw(); };
+  const runPerf = async () => { perf = null; if (view === 'performance') draw(); perf = await measure(); draw(); };
 
   const place = () => {
     const d = root.querySelector('.drawer');
@@ -349,7 +357,7 @@ const DEVTOOLS_SCRIPT: &str = r##"(() => {
   };
 
   addEventListener('keydown', e => {
-    if (!on || (e.target && e.target.tagName === 'COMPACT-REVIEW')) return;
+    if (!on) return;
     const typing = root && root.activeElement && /^(INPUT|TEXTAREA)$/.test(root.activeElement.tagName);
     if (e.key === 'Escape') {
       e.preventDefault(); e.stopImmediatePropagation();
@@ -359,21 +367,25 @@ const DEVTOOLS_SCRIPT: &str = r##"(() => {
   }, true);
 
   window.__compactDevtools = {
-    open(next, seq, who, where) {
+    open(seq, who, where, page) {
       if (who) agent = who;
       if (where === 'bottom' || where === 'right' || where === 'left') dock = where;
-      if (next && !host) mount();
-      if (host) place();
-      on = !!next;
-      if (!host) return;
-      host.style.display = on ? '' : 'none';
+      if (page && page !== pageUrl) {
+        // Another page: what was measured or sent was about the last one.
+        pageUrl = page; perf = null; sent = new Set(); composerFor = null;
+        try { origin = new URL(page).origin; } catch (_) { origin = ''; }
+      }
+      if (!host) mount();
+      place();
+      on = true;
       if (seq != null) {
         flashSeq = seq;
         const hit = entries.find(e => e.seq === seq);
         if (hit) view = hit.type === 'net' ? 'network' : 'console';
       }
-      if (on) draw();
+      draw();
     },
+    perf(m) { const done = measured; measured = null; if (done) done(m && typeof m === 'object' ? m : null); },
     add(list, reset) {
       if (reset) entries = [];
       if (Array.isArray(list)) entries.push(...list);
@@ -384,9 +396,9 @@ const DEVTOOLS_SCRIPT: &str = r##"(() => {
   post({ type: 'devtools-ready' });
 })();"##;
 
-/// The drawer script, ready to inject.
-pub fn devtools_script() -> String {
-    DEVTOOLS_SCRIPT.replace("__PERF__", PERF_SCRIPT)
+/// The drawer as a document of its own, for its own web view.
+pub fn devtools_page() -> String {
+    format!("<!doctype html><html><head><meta charset=\"utf-8\"><title>Developer tools</title></head><body><script>{DEVTOOLS_SCRIPT}</script></body></html>")
 }
 
 #[cfg(test)]
@@ -394,16 +406,18 @@ mod tests {
     use super::*;
 
     #[test]
-    fn the_drawer_carries_the_same_measurement_the_agent_gets() {
-        let s = devtools_script();
-        assert!(!s.contains("__PERF__"));
-        assert!(s.contains("largest_contentful_paint_ms"));
+    fn the_drawer_is_a_page_that_posts_only_on_its_own_handler() {
+        let p = devtools_page();
+        assert!(p.starts_with("<!doctype html>"));
+        assert!(p.contains(&format!("messageHandlers.{TOOLS_HANDLER}.postMessage")));
+        assert!(!p.contains("messageHandlers.compact."), "never the internal pages' handler");
+        assert!(!p.contains("location."), "it does not inspect itself");
     }
 
     #[test]
     fn scripts_quote_what_they_are_given() {
-        assert!(open_script(true, Some(7), "Claude \"Code\"", "right").contains(r#"open(true, 7, "Claude \"Code\"", "right")"#));
-        assert!(open_script(false, None, "x", "bottom").contains("open(false, null,"));
+        assert!(open_script(Some(7), "Claude \"Code\"", "right", "http://x/").contains(r#"open(7, "Claude \"Code\"", "right", "http://x/")"#));
+        assert!(perf_script("null").contains("perf(null)"));
         assert!(add_script("[]", true).contains("add([], true)"));
     }
 

@@ -51,6 +51,9 @@ pub enum EngineEvent {
     /// A message from the review overlay (see [`crate::review`]). Only
     /// Compact's own content world can post these.
     Review { view: usize, body: String },
+    /// A message from the developer tools drawer's own view (see
+    /// [`crate::devtools`]). The shell checks it came from that view.
+    Tools { view: usize, body: String },
     /// A navigation failed. `code` is the `NSError` code.
     Failed { view: usize, code: isize },
     /// The web content process backing this view died.
@@ -119,6 +122,8 @@ define_class!(
             let name = unsafe { message.name() }.to_string();
             if name == crate::capture::CAPTURE_HANDLER {
                 push(EngineEvent::Capture { view, line: s.to_string() });
+            } else if name == crate::devtools::TOOLS_HANDLER {
+                push(EngineEvent::Tools { view, body: s.to_string() });
             } else if name == crate::review::REVIEW_HANDLER {
                 // Registered in our world alone, but checked anyway: a
                 // comment is only ever something you typed into our overlay.

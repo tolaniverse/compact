@@ -82,6 +82,10 @@ struct Inner {
     agents: Option<agents::AgentHost>,
     /// The last capture entry handed to the open developer tools drawer.
     devtools_sent: u64,
+    /// Whether the drawer's page has loaded and can take scripts.
+    tools_ready: bool,
+    /// An entry to flash once the drawer is ready.
+    tools_flash: Option<u64>,
 }
 
 impl Inner {
@@ -261,9 +265,8 @@ impl Inner {
         // the window regardless of what is revealed. Skipped mid-transition, or
         // it would snap the travelling pages back to centre.
         if !self.sliding {
-            if let Some(v) = self.engine.view(self.app.workspaces.current().active) {
-                v.setFrame(rect(0.0, 0.0, size.0, size.1));
-            }
+            // The page has the window unless the drawer is docked beside it.
+            self.layout_tools();
         }
     }
 
@@ -360,6 +363,11 @@ impl Inner {
                 // Recorded, never acted on: the page wrote it.
                 EngineEvent::Capture { view, line } => self.engine.ingest(view, &line),
                 EngineEvent::Review { view, body } => self.on_review_message(view, &body),
+                EngineEvent::Tools { view, body } => {
+                    if self.engine.is_tools_view(view) {
+                        self.on_tools_message(&body);
+                    }
+                }
                 EngineEvent::Failed { view, code } => {
                     let Some(id) = self.engine.tab_of(view) else { continue };
                     // A failure reported against a tab already showing one of
@@ -545,6 +553,8 @@ impl Shell {
             store,
             save_failed: false,
             devtools_sent: 0,
+            tools_ready: false,
+            tools_flash: None,
         }));
         inner.borrow_mut().self_ref = Rc::downgrade(&inner);
 
@@ -636,6 +646,13 @@ fn install_monitors(inner: &Rc<RefCell<Inner>>) {
             && !in_address
             && (i.app.review == Some(front) || i.app.devtools == Some(front));
         if reviewing && chars_or_escape(&chars) == "Escape" {
+            // The drawer is a view of its own: Escape belongs to it only when
+            // it has the keyboard. Anywhere else, it closes the drawer.
+            if i.app.devtools == Some(front) && i.app.review != Some(front) && !i.engine.tools_focused(&i.window) {
+                let fx = i.app.end_devtools(front);
+                i.settle(fx);
+                return std::ptr::null_mut();
+            }
             return event as *const NSEvent as *mut NSEvent;
         }
         let editing = i.app.overlay == Overlay::Palette

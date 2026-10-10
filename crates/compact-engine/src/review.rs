@@ -170,6 +170,7 @@ pub const REVIEW_SCRIPT: &str = r#"(() => {
   };
 
   const drawBox = () => {
+    if (!host) return;
     if (!hovered || composer || card) { box.style.display = 'none'; return; }
     const r = hovered.getBoundingClientRect();
     Object.assign(box.style, { display: 'block', left: r.x - 2 + 'px', top: r.y - 2 + 'px', width: r.width + 4 + 'px', height: r.height + 4 + 'px' });
@@ -333,7 +334,10 @@ pub const REVIEW_SCRIPT: &str = r#"(() => {
       pinsEl.appendChild(d);
     });
   };
-  const relayout = () => { if (laid) return; laid = requestAnimationFrame(() => { laid = 0; layout(); drawBox(); }); };
+  // Dormant until mounted: the page's own scroll and resize events reach
+  // these listeners too, and an exception here would show up in the page's
+  // console as a "Script error." it never made.
+  const relayout = () => { if (!host || laid) return; laid = requestAnimationFrame(() => { laid = 0; layout(); drawBox(); }); };
 
   const jump = dir => {
     if (!pins.length) return;

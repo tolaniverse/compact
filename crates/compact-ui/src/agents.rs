@@ -633,9 +633,6 @@ impl Inner {
         let floats = |k: &str| -> Vec<f64> {
             v.get(k).and_then(Value::as_array).map(|a| a.iter().filter_map(Value::as_f64).collect()).unwrap_or_default()
         };
-        if self.on_devtools_message(tab, &s("type"), &v) {
-            return;
-        }
         match s("type").as_str() {
             "ready" => {
                 if self.app.review == Some(tab) {
@@ -851,56 +848,118 @@ fn agent_name(app: &compact_core::App, tab: TabId) -> String {
 }
 
 impl Inner {
-    /// Open or close the drawer on `tab`. Opening hands it everything
-    /// captured so far.
+    /// Open or close the drawer on `tab`. It lives in a view of its own
+    /// beside the page; opening it makes room for it.
     pub(super) fn show_devtools(&mut self, tab: TabId, on: bool, seq: Option<u64>) {
+        let _ = tab;
         if on {
-            let entries = self.engine.capture(tab).map(|c| (devtools_entries(c, 0), c.last_seq()));
-            if let Some((json, last)) = entries {
-                self.engine.devtools_add(tab, &json, true);
-                self.devtools_sent = last;
+            self.tools_flash = seq;
+            if self.tools_ready {
+                self.tools_point();
             }
+            self.layout_tools();
+        } else {
+            self.engine.close_tools();
+            self.engine.set_page_frame(None);
+            self.tools_ready = false;
         }
+    }
+
+    /// Size and place the page and the drawer for the current dock, or give
+    /// the page everything when the drawer's tab is not in front.
+    pub(super) fn layout_tools(&mut self) {
+        let front = self.app.workspaces.current().active;
+        let (w, h) = self.size();
+        if self.app.devtools != Some(front) {
+            self.engine.hide_tools();
+            self.engine.set_page_frame(None);
+            return;
+        }
+        use compact_core::settings::Dock;
+        use crate::widgets::rect;
+        let side = (w * 0.4).clamp(340.0, 560.0).min(w - 200.0);
+        let bottom = (h * 0.38).max(220.0).min(h - 160.0);
+        // The container is not flipped: y runs up from the bottom.
+        let (page, tools) = match self.app.settings.devtools_dock {
+            Dock::Bottom => (rect(0.0, bottom, w, h - bottom), rect(0.0, 0.0, w, bottom)),
+            Dock::Right => (rect(0.0, 0.0, w - side, h), rect(w - side, 0.0, side, h)),
+            Dock::Left => (rect(side, 0.0, w - side, h), rect(0.0, 0.0, side, h)),
+        };
+        self.engine.set_page_frame(Some(page));
+        if self.engine.open_tools(tools) {
+            self.tools_ready = false;
+        }
+    }
+
+    /// Tell the drawer which page it is looking at, and hand it everything
+    /// captured there.
+    fn tools_point(&mut self) {
+        let Some(tab) = self.app.devtools else { return };
+        let url = self.engine.url(tab).unwrap_or_default();
         let dock = self.app.settings.devtools_dock.slug();
-        self.engine.set_devtools(tab, on, seq, &agent_name(&self.app, tab), dock);
+        let seq = self.tools_flash.take();
+        if let Some(c) = self.engine.capture(tab) {
+            let json = devtools_entries(c, 0);
+            self.devtools_sent = c.last_seq();
+            self.engine.tools_eval(&compact_engine::devtools::add_script(&json, true));
+        }
+        self.engine.tools_eval(&compact_engine::devtools::open_script(seq, &agent_name(&self.app, tab), dock, &url));
     }
 
     /// Send the open drawer whatever was captured since last time.
     pub(super) fn feed_devtools(&mut self) {
         let Some(tab) = self.app.devtools else { return };
+        if !self.tools_ready {
+            return;
+        }
         let Some(c) = self.engine.capture(tab) else { return };
         if c.last_seq() <= self.devtools_sent {
             return;
         }
         let json = devtools_entries(c, self.devtools_sent);
         self.devtools_sent = c.last_seq();
-        self.engine.devtools_add(tab, &json, false);
+        self.engine.tools_eval(&compact_engine::devtools::add_script(&json, false));
     }
 
-    /// The drawer's own messages. Returns false for one that is not.
-    pub(super) fn on_devtools_message(&mut self, tab: TabId, kind: &str, msg: &Value) -> bool {
-        if kind == "devtools-dock" {
-            let d = msg.get("dock").and_then(Value::as_str).and_then(compact_core::settings::Dock::from_slug);
-            if let Some(d) = d {
-                self.app.settings.devtools_dock = d;
-            }
-            return true;
-        }
-        match kind {
+    /// A message from the drawer's own view.
+    pub(super) fn on_tools_message(&mut self, body: &str) {
+        let Ok(v) = serde_json::from_str::<Value>(body) else { return };
+        let Some(tab) = self.app.devtools else { return };
+        match v.get("type").and_then(Value::as_str).unwrap_or("") {
             "devtools-ready" => {
-                if self.app.devtools == Some(tab) {
-                    self.show_devtools(tab, true, None);
-                }
+                self.tools_ready = true;
+                self.tools_point();
             }
             "devtools-close" => {
                 let fx = self.app.end_devtools(tab);
                 self.settle(fx);
             }
-            // The drawer has already moved itself; this only remembers it.
-            "devtools-dock" => {}
-            _ => return false,
+            "devtools-dock" => {
+                let d = v.get("dock").and_then(Value::as_str).and_then(compact_core::settings::Dock::from_slug);
+                if let Some(d) = d {
+                    self.app.settings.devtools_dock = d;
+                    self.layout_tools();
+                }
+            }
+            "measure" => {
+                let me = self.self_ref.clone();
+                self.engine.performance(tab, move |r| {
+                    let json = r.unwrap_or_else(|_| "null".into());
+                    crate::widgets::queue_after(0.0, move || {
+                        if let Some(inner) = me.upgrade() {
+                            inner.borrow().engine.tools_eval(&compact_engine::devtools::perf_script(&json));
+                        }
+                    });
+                });
+            }
+            // "Send to agent": a review comment on the inspected page.
+            "comment" => {
+                if let Some(view) = self.engine.view(tab).map(|v| v as *const _ as usize) {
+                    self.on_review_message(view, body);
+                }
+            }
+            _ => {}
         }
-        true
     }
 
     /// `performance` and `show_in_devtools`. Returns false for other tools.

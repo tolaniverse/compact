@@ -90,6 +90,12 @@ pub struct WebKitEngine {
     captures: HashMap<TabId, Capture>,
     /// Where inspection scripts run, out of the page's reach.
     world: Retained<WKContentWorld>,
+    /// The developer tools drawer's own web view, while it is open. Never a
+    /// tab: it holds nothing but Compact's drawer page.
+    tools: Option<Retained<WKWebView>>,
+    /// Where pages go when something else, such as the drawer, has part of
+    /// the container. `None` means all of it.
+    page_frame: Option<CGRect>,
 }
 
 impl WebKitEngine {
@@ -119,6 +125,90 @@ impl WebKitEngine {
             agent_configs: HashMap::new(),
             captures: HashMap::new(),
             world: unsafe { WKContentWorld::worldWithName(&NSString::from_str(inspect::WORLD), mtm) },
+            tools: None,
+            page_frame: None,
+        }
+    }
+
+    /// Give pages `frame` of the container, or all of it with `None`.
+    pub fn set_page_frame(&mut self, frame: Option<CGRect>) {
+        self.page_frame = frame;
+        let f = self.page_rect();
+        if let Some(v) = self.visible.and_then(|id| self.views.get(&id)) {
+            v.setFrame(f);
+        }
+    }
+
+    fn page_rect(&self) -> CGRect {
+        self.page_frame.unwrap_or_else(|| self.container.bounds())
+    }
+
+    /// Open the drawer's view at `frame`, creating it on first use. Returns
+    /// true when it was just created and will say when it is ready.
+    pub fn open_tools(&mut self, frame: CGRect) -> bool {
+        let fresh = self.tools.is_none();
+        if fresh {
+            let mtm = self.mtm;
+            let config = unsafe { WKWebViewConfiguration::new(mtm) };
+            let view = unsafe {
+                // Its own store: the drawer keeps nothing, and shares nothing
+                // with your pages or an agent's.
+                config.setWebsiteDataStore(&WKWebsiteDataStore::nonPersistentDataStore(mtm));
+                config.userContentController().addScriptMessageHandler_name(
+                    ProtocolObject::from_ref(&*self.bridge),
+                    &NSString::from_str(crate::devtools::TOOLS_HANDLER),
+                );
+                let v = WKWebView::initWithFrame_configuration(WKWebView::alloc(mtm), frame, &config);
+                v.loadHTMLString_baseURL(&NSString::from_str(&crate::devtools::devtools_page()), None);
+                v
+            };
+            self.tools = Some(view);
+        }
+        if let Some(v) = &self.tools {
+            v.setFrame(frame);
+            if unsafe { v.superview() }.is_none() {
+                self.container.addSubview(v);
+            }
+        }
+        fresh
+    }
+
+    /// Take the drawer off screen, keeping it for when it comes back.
+    pub fn hide_tools(&mut self) {
+        if let Some(v) = &self.tools {
+            v.removeFromSuperview();
+        }
+    }
+
+    /// Close the drawer for good, releasing its view.
+    pub fn close_tools(&mut self) {
+        if let Some(v) = self.tools.take() {
+            v.removeFromSuperview();
+        }
+    }
+
+    /// Whether the keyboard is in the drawer: `window`'s first responder is
+    /// the drawer's view or something inside it.
+    pub fn tools_focused(&self, window: &objc2_app_kit::NSWindow) -> bool {
+        let Some(tools) = &self.tools else { return false };
+        let Some(r) = window.firstResponder() else { return false };
+        unsafe {
+            let is_view: bool = msg_send![&*r, isKindOfClass: NSView::class()];
+            is_view && msg_send![&*r, isDescendantOf: &**tools]
+        }
+    }
+
+    /// Whether a web view, by address, is the drawer's.
+    pub fn is_tools_view(&self, view_addr: usize) -> bool {
+        self.tools.as_ref().is_some_and(|v| Retained::as_ptr(v) as usize == view_addr)
+    }
+
+    /// Run one of [`crate::devtools`]'s scripts in the drawer.
+    pub fn tools_eval(&self, js: &str) {
+        if let Some(v) = &self.tools {
+            unsafe {
+                v.evaluateJavaScript_completionHandler(&NSString::from_str(js), None);
+            }
         }
     }
 
@@ -167,14 +257,6 @@ impl WebKitEngine {
                 &self.world,
             );
             ucc.addUserScript(&review);
-            let devtools = WKUserScript::initWithSource_injectionTime_forMainFrameOnly_inContentWorld(
-                WKUserScript::alloc(mtm),
-                &NSString::from_str(&crate::devtools::devtools_script()),
-                WKUserScriptInjectionTime::AtDocumentEnd,
-                true,
-                &self.world,
-            );
-            ucc.addUserScript(&devtools);
             // The page-world half of source lookup: it only answers the
             // overlay's question about one element.
             let hook = WKUserScript::initWithSource_injectionTime_forMainFrameOnly(
@@ -282,8 +364,9 @@ impl WebKitEngine {
                 v.removeFromSuperview();
             }
         }
+        let frame = self.page_rect();
         if let Some(v) = self.views.get(&id) {
-            v.setFrame(self.container.bounds());
+            v.setFrame(frame);
             self.container.addSubview(v);
             self.visible = Some(id);
         }
@@ -452,20 +535,6 @@ impl WebKitEngine {
     pub fn set_review(&self, id: TabId, on: bool, pins_json: &str, agent: &str) {
         if let Some(v) = self.views.get(&id) {
             self.eval_in_world(v, &crate::review::set_script(on, pins_json, agent), |_| {});
-        }
-    }
-
-    /// Open or close the developer tools drawer on `id`.
-    pub fn set_devtools(&self, id: TabId, on: bool, seq: Option<u64>, agent: &str, dock: &str) {
-        if let Some(v) = self.views.get(&id) {
-            self.eval_in_world(v, &crate::devtools::open_script(on, seq, agent, dock), |_| {});
-        }
-    }
-
-    /// Give the drawer on `id` more entries; `reset` replaces what it had.
-    pub fn devtools_add(&self, id: TabId, entries_json: &str, reset: bool) {
-        if let Some(v) = self.views.get(&id) {
-            self.eval_in_world(v, &crate::devtools::add_script(entries_json, reset), |_| {});
         }
     }
 
