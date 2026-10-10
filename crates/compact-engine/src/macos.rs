@@ -202,6 +202,11 @@ impl WebKitEngine {
         }
     }
 
+    /// The drawer's view, while it is open, for the shell to style.
+    pub fn tools_view(&self) -> Option<&WKWebView> {
+        self.tools.as_deref()
+    }
+
     /// Whether a web view, by address, is the drawer's.
     pub fn is_tools_view(&self, view_addr: usize) -> bool {
         self.tools.as_ref().is_some_and(|v| Retained::as_ptr(v) as usize == view_addr)
