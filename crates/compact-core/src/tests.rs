@@ -1770,8 +1770,8 @@ fn the_palette_offers_agent_commands_only_in_an_agent_workspace() {
     assert!(!has(&app, "Take control from Claude Code"));
 
     app.apply(Action::SwitchWorkspace(a));
-    let first = &app.commands()[1];
-    assert_eq!(first.label, "Take control from Claude Code", "agent rows come first, after review");
+    let first = &app.commands()[2];
+    assert_eq!(first.label, "Take control from Claude Code", "agent rows come first, after review and devtools");
     assert!(has(&app, "Close Claude Code's workspace"));
 
     app.apply(Action::TakeControl);
@@ -2263,4 +2263,41 @@ fn comments_saved_before_source_lookup_still_open() {
     let c = &back.workspaces.spaces[ws].agent.as_ref().unwrap().comments[0];
     assert_eq!(c.body, "x");
     assert!(c.anchor.source.is_empty());
+}
+
+// ---- developer tools ---------------------------------------------------------
+
+#[test]
+fn devtools_open_on_cmd_alt_i_in_agent_workspaces_only() {
+    let mut app = App::fresh();
+    let m = Mods { cmd: true, shift: false, alt: true };
+    assert_eq!(app.resolve_key("i", m, false), Some(Action::ToggleDevTools));
+    assert!(app.apply(Action::ToggleDevTools).is_empty(), "not on your own tabs");
+    let (mut app, _, tab) = reviewing();
+    assert_eq!(app.apply(Action::ToggleDevTools), vec![Effect::SetDevTools(tab, true, None)]);
+    assert_eq!(app.devtools, Some(tab));
+    assert_eq!(app.apply(Action::ToggleDevTools), vec![Effect::SetDevTools(tab, false, None)]);
+    assert_eq!(app.devtools, None);
+}
+
+#[test]
+fn an_agent_can_point_you_at_an_entry() {
+    let (mut app, ws, tab) = reviewing();
+    let fx = app.show_in_devtools(ws, tab, Some(7), Some("This 500 is the bug"));
+    assert_eq!(fx, vec![Effect::SetDevTools(tab, true, Some(7))]);
+    assert_eq!(activity(&app).last().unwrap().text, "This 500 is the bug");
+    assert!(app.show_in_devtools(0, tab, None, None).is_empty(), "not from your own workspace");
+    assert_eq!(app.end_devtools(tab), vec![Effect::SetDevTools(tab, false, None)]);
+    assert!(app.end_devtools(tab).is_empty());
+}
+
+#[test]
+fn the_devtools_dock_is_remembered() {
+    use crate::settings::Dock;
+    let mut app = App::fresh();
+    assert_eq!(app.settings.devtools_dock, Dock::Bottom);
+    app.settings.devtools_dock = Dock::Right;
+    let back = persist::decode(&app.snapshot()).unwrap();
+    assert_eq!(back.settings.devtools_dock, Dock::Right);
+    assert_eq!(Dock::from_slug("sideways"), None);
 }

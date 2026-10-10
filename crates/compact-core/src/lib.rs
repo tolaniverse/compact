@@ -88,6 +88,9 @@ pub enum Effect {
     Reload(TabId),
     /// Show or hide the review overlay on this tab, with its pins.
     SetReview(TabId, bool),
+    /// Open or close the developer tools drawer on this tab. The optional
+    /// sequence number is an entry to scroll to and flash.
+    SetDevTools(TabId, bool, Option<u64>),
 }
 
 /// Floor for a freshly-started navigation, so the bar is visible immediately.
@@ -238,6 +241,8 @@ pub struct App {
     pub approvals: Vec<agent::Approval>,
     /// The tab showing the review overlay, if any.
     pub review: Option<TabId>,
+    /// The tab with the developer tools drawer open, if any.
+    pub devtools: Option<TabId>,
     /// The last comment id handed out. Saved, so ids never repeat.
     pub comment_seq: u64,
 
@@ -311,6 +316,7 @@ impl App {
             history: Vec::new(),
             approvals: Vec::new(),
             review: None,
+            devtools: None,
             comment_seq: 0,
             query: String::new(),
             selection: 0,
@@ -622,6 +628,7 @@ impl App {
                 fx.extend(self.close_agent_workspace(i));
             }
             Action::ToggleReview => fx.extend(self.toggle_review()),
+            Action::ToggleDevTools => fx.extend(self.toggle_devtools()),
             Action::RevokeAgent(i) => {
                 self.overlay = Overlay::None;
                 fx.extend(self.revoke_agent(i));

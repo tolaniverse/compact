@@ -382,7 +382,7 @@ pub const REVIEW_SCRIPT: &str = r#"(() => {
   };
 
   addEventListener('keydown', e => {
-    if (!on) return;
+    if (!on || (e.target && e.target.tagName === 'COMPACT-DEVTOOLS')) return;
     const stop = () => { e.preventDefault(); e.stopImmediatePropagation(); };
     const typing = root && root.activeElement && root.activeElement.tagName === 'TEXTAREA';
     if (!composer && card && typing) {

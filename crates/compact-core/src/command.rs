@@ -57,6 +57,8 @@ pub enum Action {
     RevokeAgent(usize),
     /// Comment on the page in front for its agent (⌘⇧R).
     ToggleReview,
+    /// The console, network and performance drawer (⌘⌥I).
+    ToggleDevTools,
 }
 
 /// A palette row.
@@ -119,7 +121,13 @@ pub fn command_list(
             hint: key(BindingId::Review),
             action: Action::ToggleReview,
         };
-        [review, control, close, revoke]
+        let devtools = Command {
+            icon: "⌥",
+            label: "Developer tools".into(),
+            hint: key(BindingId::DevTools),
+            action: Action::ToggleDevTools,
+        };
+        [review, devtools, control, close, revoke]
     });
     agent_rows.chain(vec![
         Command { icon: "+", label: "New tab".into(), hint: key(BindingId::NewTab), action: Action::NewTab },

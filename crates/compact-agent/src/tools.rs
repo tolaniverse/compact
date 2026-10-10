@@ -23,11 +23,13 @@ pub const GET_COMMENTS: &str = "get_comments";
 pub const WAIT_FOR_FEEDBACK: &str = "wait_for_feedback";
 pub const REPLY_TO_COMMENT: &str = "reply_to_comment";
 pub const MARK_ADDRESSED: &str = "mark_addressed";
+pub const PERFORMANCE: &str = "performance";
+pub const SHOW_IN_DEVTOOLS: &str = "show_in_devtools";
 
 /// Every tool name, in the order they are listed.
-pub const ALL: [&str; 14] = [
+pub const ALL: [&str; 16] = [
     LIST_TABS, OPEN_TAB, NAVIGATE, RELOAD, CLOSE_TAB, SNAPSHOT, SCREENSHOT, CONSOLE_LOGS, NETWORK_REQUESTS,
-    REQUEST_REVIEW, GET_COMMENTS, WAIT_FOR_FEEDBACK, REPLY_TO_COMMENT, MARK_ADDRESSED,
+    PERFORMANCE, SHOW_IN_DEVTOOLS, REQUEST_REVIEW, GET_COMMENTS, WAIT_FOR_FEEDBACK, REPLY_TO_COMMENT, MARK_ADDRESSED,
 ];
 
 /// The longest `wait_for_feedback` may block, in seconds.
@@ -116,6 +118,21 @@ pub fn list() -> Value {
                 "failed_only": {"type": "boolean", "description": "Only failures and 4xx/5xx responses."}
             }},
             "annotations": {"readOnlyHint": true}
+        },
+        {
+            "name": PERFORMANCE,
+            "description": "Measure a tab's page: time to first byte, DOM content loaded, load, first and largest contentful paint, layout shift, long tasks, resource count, size and the slowest five, and DOM size. Metrics the engine does not report say \"unsupported\".",
+            "inputSchema": {"type": "object", "properties": {"tab": tab_param()}},
+            "annotations": {"readOnlyHint": true}
+        },
+        {
+            "name": SHOW_IN_DEVTOOLS,
+            "description": "Open Compact's developer tools for the user on a tab and flash one console or network entry, to point them at what you found.",
+            "inputSchema": {"type": "object", "properties": {
+                "tab": tab_param(),
+                "seq": {"type": "integer", "description": "The entry's seq from console_logs or network_requests."},
+                "note": {"type": "string", "description": "Why, shown to the user."}
+            }}
         },
         {
             "name": REQUEST_REVIEW,

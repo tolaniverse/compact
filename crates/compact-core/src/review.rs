@@ -176,6 +176,65 @@ impl App {
         fx
     }
 
+    /// Open or close the developer tools on the tab in front (⌘⌥I).
+    ///
+    /// Agent workspaces only for now: those are the tabs whose console and
+    /// network activity Compact captures.
+    pub fn toggle_devtools(&mut self) -> Vec<Effect> {
+        let ws = self.workspaces.current;
+        let w = self.workspaces.current();
+        let tab = w.active;
+        if !w.is_agent() {
+            self.notifications.push_status(
+                ws,
+                "Developer tools are for agent workspaces".to_string(),
+                "Their tabs are the ones whose console and network Compact records".to_string(),
+                tab,
+                self.clock,
+            );
+            return Vec::new();
+        }
+        let mut fx = Vec::new();
+        if let Some(prev) = self.devtools.take() {
+            fx.push(Effect::SetDevTools(prev, false, None));
+            if prev == tab {
+                return fx;
+            }
+        }
+        self.devtools = Some(tab);
+        self.overlay = crate::Overlay::None;
+        fx.push(Effect::SetDevTools(tab, true, None));
+        fx
+    }
+
+    /// Open the drawer on `tab` at entry `seq`, for workspace `ws`'s agent
+    /// pointing you at something. Tells you why.
+    pub fn show_in_devtools(&mut self, ws: usize, tab: TabId, seq: Option<u64>, note: Option<&str>) -> Vec<Effect> {
+        let Some(client) = self.workspaces.spaces.get(ws).and_then(|w| w.agent.as_ref()).map(|a| a.client.clone()) else {
+            return Vec::new();
+        };
+        let mut fx = Vec::new();
+        if let Some(prev) = self.devtools.replace(tab) {
+            if prev != tab {
+                fx.push(Effect::SetDevTools(prev, false, None));
+            }
+        }
+        fx.push(Effect::SetDevTools(tab, true, seq));
+        let text = note.map(str::trim).filter(|n| !n.is_empty()).unwrap_or("Take a look in developer tools").to_string();
+        let now = self.clock;
+        self.post_activity(ws, text, format!("{client} · ⌘⌥I"), tab, now);
+        fx
+    }
+
+    /// The drawer closed itself (its close button, or Esc).
+    pub fn end_devtools(&mut self, tab: TabId) -> Vec<Effect> {
+        if self.devtools == Some(tab) {
+            self.devtools = None;
+            return vec![Effect::SetDevTools(tab, false, None)];
+        }
+        Vec::new()
+    }
+
     /// The page asked to leave review mode (Esc with nothing open).
     pub fn end_review(&mut self, tab: TabId) -> Vec<Effect> {
         if self.review == Some(tab) {

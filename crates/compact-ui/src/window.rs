@@ -80,6 +80,8 @@ struct Inner {
     /// The agent socket and the requests in flight on it. `None` in demo mode
     /// and when another Compact already holds the socket.
     agents: Option<agents::AgentHost>,
+    /// The last capture entry handed to the open developer tools drawer.
+    devtools_sent: u64,
 }
 
 impl Inner {
@@ -142,6 +144,7 @@ impl Inner {
                 }
                 Effect::Reload(id) => self.engine.reload(id),
                 Effect::SetReview(id, on) => agents::show_review(&self.app, &self.engine, id, on),
+                Effect::SetDevTools(id, on, seq) => self.show_devtools(id, on, seq),
                 // Deferred: the render that follows is what makes these
                 // visible, and focusing a hidden field does nothing.
                 Effect::FocusAddressField => self.pending_focus = Some(Focus::Address),
@@ -541,6 +544,7 @@ impl Shell {
             },
             store,
             save_failed: false,
+            devtools_sent: 0,
         }));
         inner.borrow_mut().self_ref = Rc::downgrade(&inner);
 
@@ -625,9 +629,12 @@ fn install_monitors(inner: &Rc<RefCell<Inner>>) {
         let in_address = i.chrome.address_editing();
         // In review mode the page's overlay takes plain keys — Escape,
         // Return, its comment box — so only chords reach the shell.
+        // So does the developer tools drawer, for its filter and its
+        // "send to agent" box.
+        let front = i.app.workspaces.current().active;
         let reviewing = i.app.overlay == Overlay::None
             && !in_address
-            && i.app.review == Some(i.app.workspaces.current().active);
+            && (i.app.review == Some(front) || i.app.devtools == Some(front));
         if reviewing && chars_or_escape(&chars) == "Escape" {
             return event as *const NSEvent as *mut NSEvent;
         }
@@ -980,6 +987,7 @@ fn install_load_poll(inner: &Rc<RefCell<Inner>>) {
         let mut i = poll.borrow_mut();
         i.app.clock = i.now_ms();
         i.service_agents();
+        i.feed_devtools();
         let active = i.app.workspaces.current().active;
         let Some((loading, progress)) = i.engine.load_state(active) else {
             return;

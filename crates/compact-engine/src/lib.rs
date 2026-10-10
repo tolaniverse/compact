@@ -13,6 +13,7 @@ use compact_core::tab::TabId;
 use std::fmt;
 
 pub mod capture;
+pub mod devtools;
 pub mod inspect;
 pub mod review;
 pub mod source;

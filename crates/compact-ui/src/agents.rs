@@ -205,7 +205,9 @@ impl Inner {
             Ok(t) => t,
             Err(r) => return self.agent_reply(conn, id, r),
         };
-        if self.review_call((conn, id), &session, ws, tab, tool, &args) {
+        if self.review_call((conn, id), &session, ws, tab, tool, &args)
+            || self.devtools_call((conn, id), ws, tab, tool, &args)
+        {
             return;
         }
         let wait = |then| Wait { conn, id, tab, since: 0, then };
@@ -631,6 +633,9 @@ impl Inner {
         let floats = |k: &str| -> Vec<f64> {
             v.get(k).and_then(Value::as_array).map(|a| a.iter().filter_map(Value::as_f64).collect()).unwrap_or_default()
         };
+        if self.on_devtools_message(tab, &s("type"), &v) {
+            return;
+        }
         match s("type").as_str() {
             "ready" => {
                 if self.app.review == Some(tab) {
@@ -816,5 +821,137 @@ impl Inner {
         if let Some(h) = self.agents.as_mut() {
             h.feedback.extend(still);
         }
+    }
+}
+
+// ---- developer tools -------------------------------------------------------------
+
+/// Captured entries after `since`, as the drawer's `add` takes them.
+fn devtools_entries(c: &compact_engine::capture::Capture, since: u64) -> String {
+    let mut all: Vec<(u64, Value)> = c
+        .console_since(since)
+        .map(|e| {
+            (e.seq, json!({"type": "console", "seq": e.seq, "level": e.level.label(), "text": e.text, "source": e.source, "stack": e.stack}))
+        })
+        .chain(c.network_since(since).map(|e| {
+            (e.seq, json!({"type": "net", "seq": e.seq, "kind": e.kind.label(), "method": e.method, "url": e.url,
+                "status": e.status, "ms": e.ms, "error": e.error}))
+        }))
+        .collect();
+    all.sort_by_key(|(s, _)| *s);
+    Value::Array(all.into_iter().map(|(_, v)| v).collect()).to_string()
+}
+
+fn agent_name(app: &compact_core::App, tab: TabId) -> String {
+    app.workspaces
+        .locate(tab)
+        .and_then(|(ws, _)| app.workspaces.spaces[ws].agent.as_ref())
+        .map(|a| a.client.clone())
+        .unwrap_or_else(|| "the agent".into())
+}
+
+impl Inner {
+    /// Open or close the drawer on `tab`. Opening hands it everything
+    /// captured so far.
+    pub(super) fn show_devtools(&mut self, tab: TabId, on: bool, seq: Option<u64>) {
+        if on {
+            let entries = self.engine.capture(tab).map(|c| (devtools_entries(c, 0), c.last_seq()));
+            if let Some((json, last)) = entries {
+                self.engine.devtools_add(tab, &json, true);
+                self.devtools_sent = last;
+            }
+        }
+        let dock = self.app.settings.devtools_dock.slug();
+        self.engine.set_devtools(tab, on, seq, &agent_name(&self.app, tab), dock);
+    }
+
+    /// Send the open drawer whatever was captured since last time.
+    pub(super) fn feed_devtools(&mut self) {
+        let Some(tab) = self.app.devtools else { return };
+        let Some(c) = self.engine.capture(tab) else { return };
+        if c.last_seq() <= self.devtools_sent {
+            return;
+        }
+        let json = devtools_entries(c, self.devtools_sent);
+        self.devtools_sent = c.last_seq();
+        self.engine.devtools_add(tab, &json, false);
+    }
+
+    /// The drawer's own messages. Returns false for one that is not.
+    pub(super) fn on_devtools_message(&mut self, tab: TabId, kind: &str, msg: &Value) -> bool {
+        if kind == "devtools-dock" {
+            let d = msg.get("dock").and_then(Value::as_str).and_then(compact_core::settings::Dock::from_slug);
+            if let Some(d) = d {
+                self.app.settings.devtools_dock = d;
+            }
+            return true;
+        }
+        match kind {
+            "devtools-ready" => {
+                if self.app.devtools == Some(tab) {
+                    self.show_devtools(tab, true, None);
+                }
+            }
+            "devtools-close" => {
+                let fx = self.app.end_devtools(tab);
+                self.settle(fx);
+            }
+            // The drawer has already moved itself; this only remembers it.
+            "devtools-dock" => {}
+            _ => return false,
+        }
+        true
+    }
+
+    /// `performance` and `show_in_devtools`. Returns false for other tools.
+    fn devtools_call(&mut self, (conn, id): (ConnId, u64), ws: usize, tab: TabId, tool: &str, args: &Value) -> bool {
+        match tool {
+            tools::PERFORMANCE => {
+                let fx = match self.app.agent_wake(ws, tab) {
+                    Ok(fx) => fx,
+                    Err(e) => {
+                        self.agent_reply(conn, id, err(e));
+                        return true;
+                    }
+                };
+                if !fx.is_empty() {
+                    // Asleep a moment ago: a fresh load would measure a
+                    // different page than the one the agent asked about.
+                    self.perform(fx);
+                    self.agent_reply(conn, id, err("the tab was not loaded; it is loading now, call performance again in a moment"));
+                    return true;
+                }
+                let Some(server) = self.agents.as_ref().map(|h| h.server.clone()) else { return true };
+                let footprint = self.app.workspaces.locate(tab).map(|(_, t)| t.effective_footprint() / (1024 * 1024));
+                self.engine.performance(tab, move |r| {
+                    let reply = match r.and_then(|s| serde_json::from_str::<Value>(&s).map_err(|e| e.to_string())) {
+                        Ok(mut v) => {
+                            v["tab"] = json!(tab_ref(tab));
+                            v["compact_memory_estimate_mb"] = json!(footprint);
+                            Reply::Ok(v)
+                        }
+                        Err(e) => err(e),
+                    };
+                    server.reply(conn, id, &reply);
+                });
+            }
+            tools::SHOW_IN_DEVTOOLS => {
+                let fx = match self.app.agent_wake(ws, tab) {
+                    Ok(fx) => fx,
+                    Err(e) => {
+                        self.agent_reply(conn, id, err(e));
+                        return true;
+                    }
+                };
+                self.perform(fx);
+                let seq = args.get("seq").and_then(Value::as_u64);
+                let note = args.get("note").and_then(Value::as_str);
+                let fx = self.app.show_in_devtools(ws, tab, seq, note);
+                self.settle(fx);
+                self.agent_reply(conn, id, Reply::Ok(json!({"tab": tab_ref(tab), "shown": true})));
+            }
+            _ => return false,
+        }
+        true
     }
 }

@@ -106,6 +106,7 @@ pub fn encode(app: &App) -> String {
 
     let s = &app.settings;
     line(&mut out, &["startup", s.startup.slug()]);
+    line(&mut out, &["devtools", s.devtools_dock.slug()]);
     line(
         &mut out,
         &["blocks", flag(s.blocks.recents), flag(s.blocks.pinned), flag(s.blocks.workspaces)],
@@ -315,6 +316,12 @@ pub fn decode(text: &str) -> Result<App, LoadError> {
                 chrome.smooth_motion = f[4] == "1";
                 chrome.dim_page = f[5] == "1";
                 chrome.show_hint = f[6] == "1";
+            }
+            "devtools" => {
+                need(2)?;
+                if let Some(d) = crate::settings::Dock::from_slug(&f[1]) {
+                    settings.devtools_dock = d;
+                }
             }
             "startup" => {
                 need(2)?;

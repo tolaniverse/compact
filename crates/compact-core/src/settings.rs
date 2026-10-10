@@ -212,10 +212,11 @@ pub enum BindingId {
     AllSettings,
     Shortcuts,
     Review,
+    DevTools,
 }
 
 impl BindingId {
-    pub const ALL: [BindingId; 14] = [
+    pub const ALL: [BindingId; 15] = [
         BindingId::Palette,
         BindingId::Address,
         BindingId::NewTab,
@@ -230,6 +231,7 @@ impl BindingId {
         BindingId::AllSettings,
         BindingId::Shortcuts,
         BindingId::Review,
+        BindingId::DevTools,
     ];
 
     pub const fn label(self) -> &'static str {
@@ -248,6 +250,7 @@ impl BindingId {
             BindingId::AllSettings => "All settings",
             BindingId::Shortcuts => "Shortcuts",
             BindingId::Review => "Review mode",
+            BindingId::DevTools => "Developer tools",
         }
     }
 
@@ -267,6 +270,7 @@ impl BindingId {
             BindingId::AllSettings => "deep",
             BindingId::Shortcuts => "keys",
             BindingId::Review => "review",
+            BindingId::DevTools => "devtools",
         }
     }
 
@@ -292,6 +296,7 @@ impl BindingId {
             BindingId::AllSettings => Some(Action::OpenSettingsPage),
             BindingId::Shortcuts => Some(Action::OpenShortcuts),
             BindingId::Review => Some(Action::ToggleReview),
+            BindingId::DevTools => Some(Action::ToggleDevTools),
         }
     }
 
@@ -326,7 +331,33 @@ impl BindingId {
             // `?` is shift-slash, and that is exactly how it arrives.
             BindingId::Shortcuts => Chord::new(false, true, false, "/"),
             BindingId::Review => Chord::new(true, true, false, "r"),
+            BindingId::DevTools => Chord::new(true, false, true, "i"),
         }
+    }
+}
+
+/// Where the developer tools drawer is docked.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+pub enum Dock {
+    #[default]
+    Bottom,
+    Right,
+    Left,
+}
+
+impl Dock {
+    pub const ALL: [Dock; 3] = [Dock::Bottom, Dock::Right, Dock::Left];
+
+    pub const fn slug(self) -> &'static str {
+        match self {
+            Dock::Bottom => "bottom",
+            Dock::Right => "right",
+            Dock::Left => "left",
+        }
+    }
+
+    pub fn from_slug(s: &str) -> Option<Self> {
+        Self::ALL.into_iter().find(|d| d.slug() == s)
     }
 }
 
@@ -396,6 +427,8 @@ impl Keymap {
 #[derive(Clone, Debug)]
 pub struct Settings {
     pub startup: Startup,
+    /// Which edge of the page the developer tools drawer sits on.
+    pub devtools_dock: Dock,
     pub blocks: Blocks,
     /// One mode per workspace, indexed the same way.
     pub notif_modes: Vec<NotifMode>,
@@ -408,6 +441,7 @@ impl Default for Settings {
     fn default() -> Self {
         Self {
             startup: Startup::NewTab,
+            devtools_dock: Dock::Bottom,
             blocks: Blocks::default(),
             // Matches the canvas's seed: Research starts on Mentions, so the
             // three modes are visibly distinct on first run.

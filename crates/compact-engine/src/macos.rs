@@ -167,6 +167,14 @@ impl WebKitEngine {
                 &self.world,
             );
             ucc.addUserScript(&review);
+            let devtools = WKUserScript::initWithSource_injectionTime_forMainFrameOnly_inContentWorld(
+                WKUserScript::alloc(mtm),
+                &NSString::from_str(&crate::devtools::devtools_script()),
+                WKUserScriptInjectionTime::AtDocumentEnd,
+                true,
+                &self.world,
+            );
+            ucc.addUserScript(&devtools);
             // The page-world half of source lookup: it only answers the
             // overlay's question about one element.
             let hook = WKUserScript::initWithSource_injectionTime_forMainFrameOnly(
@@ -415,11 +423,12 @@ impl WebKitEngine {
             done(Err(format!("{id} is not live")));
             return;
         };
-        let mtm = self.mtm;
         let Some(target) = target else {
-            take_snapshot(mtm, &view, None, done);
+            self.clean_snapshot(view, None, done);
             return;
         };
+        let mtm = self.mtm;
+        let world = self.world.clone();
         let v = view.clone();
         let target = target.to_string();
         self.eval_in_world(&view, &inspect::locate_script(&target), move |r| match r {
@@ -430,7 +439,7 @@ impl WebKitEngine {
             Ok(s) => {
                 let b = v.bounds();
                 match inspect::parse_rect(&s, (b.size.width, b.size.height)) {
-                    Some(rect) => take_snapshot(mtm, &v, Some(rect), done),
+                    Some(rect) => clean_snapshot_with(mtm, world, v, Some(rect), done),
                     None => done(Err("the element has no visible area".into())),
                 }
             }
@@ -444,6 +453,75 @@ impl WebKitEngine {
         if let Some(v) = self.views.get(&id) {
             self.eval_in_world(v, &crate::review::set_script(on, pins_json, agent), |_| {});
         }
+    }
+
+    /// Open or close the developer tools drawer on `id`.
+    pub fn set_devtools(&self, id: TabId, on: bool, seq: Option<u64>, agent: &str, dock: &str) {
+        if let Some(v) = self.views.get(&id) {
+            self.eval_in_world(v, &crate::devtools::open_script(on, seq, agent, dock), |_| {});
+        }
+    }
+
+    /// Give the drawer on `id` more entries; `reset` replaces what it had.
+    pub fn devtools_add(&self, id: TabId, entries_json: &str, reset: bool) {
+        if let Some(v) = self.views.get(&id) {
+            self.eval_in_world(v, &crate::devtools::add_script(entries_json, reset), |_| {});
+        }
+    }
+
+    /// Measure `id`'s page load and rendering (see
+    /// [`crate::devtools::PERF_SCRIPT`]); the answer is a JSON string.
+    pub fn performance(&self, id: TabId, done: impl FnOnce(std::result::Result<String, String>) + 'static) {
+        match self.views.get(&id) {
+            Some(v) => self.call_async_in_world(v, crate::devtools::PERF_SCRIPT, done),
+            None => done(Err(format!("{id} is not live"))),
+        }
+    }
+
+    /// Run an async function body in Compact's world and hand back the
+    /// string it resolves to. Unlike [`Self::eval_in_world`], this waits for
+    /// promises, which is what lets a script wait for a frame to be drawn.
+    fn call_async_in_world(
+        &self,
+        view: &WKWebView,
+        body: &str,
+        done: impl FnOnce(std::result::Result<String, String>) + 'static,
+    ) {
+        let done = Cell::new(Some(done));
+        let block = RcBlock::new(move |res: *mut AnyObject, err: *mut NSError| {
+            let Some(done) = done.take() else { return };
+            if let Some(err) = unsafe { err.as_ref() } {
+                done(Err(js_error_text(err)));
+                return;
+            }
+            match unsafe { res.as_ref() } {
+                Some(obj) if is_string(obj) => {
+                    let s: &NSString = unsafe { &*(obj as *const AnyObject as *const NSString) };
+                    done(Ok(s.to_string()));
+                }
+                _ => done(Err("the script returned no text".into())),
+            }
+        });
+        unsafe {
+            view.callAsyncJavaScript_arguments_inFrame_inContentWorld_completionHandler(
+                &NSString::from_str(body),
+                None,
+                None,
+                &self.world,
+                Some(&block),
+            );
+        }
+    }
+
+    /// Snapshot `view` with Compact's own page UI — the review overlay and
+    /// the drawer — out of the picture, then put it back.
+    fn clean_snapshot(
+        &self,
+        view: Retained<WKWebView>,
+        rect: Option<(f64, f64, f64, f64)>,
+        done: impl FnOnce(std::result::Result<Vec<u8>, String>) + 'static,
+    ) {
+        clean_snapshot_with(self.mtm, self.world.clone(), view, rect, done);
     }
 
     /// A PNG of part of the viewport, in CSS pixels, clipped to it.
@@ -460,7 +538,7 @@ impl WebKitEngine {
         let b = view.bounds();
         let s = format!("{},{},{},{}", rect.0, rect.1, rect.2, rect.3);
         match inspect::parse_rect(&s, (b.size.width, b.size.height)) {
-            Some(r) => take_snapshot(self.mtm, view, Some(r), done),
+            Some(r) => self.clean_snapshot(view.clone(), Some(r), done),
             None => done(Err("that area is off screen".into())),
         }
     }
@@ -497,6 +575,45 @@ impl WebKitEngine {
                 Some(&block),
             );
         }
+    }
+}
+
+/// [`WebKitEngine::clean_snapshot`] for callers that no longer hold the
+/// engine, such as a script's completion handler.
+fn clean_snapshot_with(
+    mtm: MainThreadMarker,
+    world: Retained<WKContentWorld>,
+    view: Retained<WKWebView>,
+    rect: Option<(f64, f64, f64, f64)>,
+    done: impl FnOnce(std::result::Result<Vec<u8>, String>) + 'static,
+) {
+    let done = Cell::new(Some(done));
+    let v = view.clone();
+    let w = world.clone();
+    let block = RcBlock::new(move |_res: *mut AnyObject, _err: *mut NSError| {
+        let Some(done) = done.take() else { return };
+        let v2 = v.clone();
+        let w2 = w.clone();
+        take_snapshot(mtm, &v, rect, move |shot| {
+            unsafe {
+                v2.evaluateJavaScript_inFrame_inContentWorld_completionHandler(
+                    &NSString::from_str(crate::devtools::SHOW_UI_SCRIPT),
+                    None,
+                    &w2,
+                    None,
+                );
+            }
+            done(shot);
+        });
+    });
+    unsafe {
+        view.callAsyncJavaScript_arguments_inFrame_inContentWorld_completionHandler(
+            &NSString::from_str(crate::devtools::HIDE_UI_SCRIPT),
+            None,
+            None,
+            &world,
+            Some(&block),
+        );
     }
 }
 
