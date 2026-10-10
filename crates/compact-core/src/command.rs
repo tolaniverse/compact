@@ -59,6 +59,12 @@ pub enum Action {
     ToggleReview,
     /// The console, network and performance drawer (⌘⌥I).
     ToggleDevTools,
+    /// Two workspaces side by side, or back to one (⌘\).
+    ToggleSplit,
+    /// Move focus to the other side of a split (⌘⌥\).
+    FocusOtherSide,
+    /// Focus one side of a split, e.g. after a click on it.
+    FocusSide(crate::split::Side),
 }
 
 /// A palette row.

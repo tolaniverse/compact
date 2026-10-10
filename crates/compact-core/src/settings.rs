@@ -213,10 +213,12 @@ pub enum BindingId {
     Shortcuts,
     Review,
     DevTools,
+    Split,
+    SplitFocus,
 }
 
 impl BindingId {
-    pub const ALL: [BindingId; 15] = [
+    pub const ALL: [BindingId; 17] = [
         BindingId::Palette,
         BindingId::Address,
         BindingId::NewTab,
@@ -232,6 +234,8 @@ impl BindingId {
         BindingId::Shortcuts,
         BindingId::Review,
         BindingId::DevTools,
+        BindingId::Split,
+        BindingId::SplitFocus,
     ];
 
     pub const fn label(self) -> &'static str {
@@ -251,6 +255,8 @@ impl BindingId {
             BindingId::Shortcuts => "Shortcuts",
             BindingId::Review => "Review mode",
             BindingId::DevTools => "Developer tools",
+            BindingId::Split => "Split view",
+            BindingId::SplitFocus => "Switch split side",
         }
     }
 
@@ -271,6 +277,8 @@ impl BindingId {
             BindingId::Shortcuts => "keys",
             BindingId::Review => "review",
             BindingId::DevTools => "devtools",
+            BindingId::Split => "split",
+            BindingId::SplitFocus => "splitfocus",
         }
     }
 
@@ -297,6 +305,8 @@ impl BindingId {
             BindingId::Shortcuts => Some(Action::OpenShortcuts),
             BindingId::Review => Some(Action::ToggleReview),
             BindingId::DevTools => Some(Action::ToggleDevTools),
+            BindingId::Split => Some(Action::ToggleSplit),
+            BindingId::SplitFocus => Some(Action::FocusOtherSide),
         }
     }
 
@@ -332,6 +342,8 @@ impl BindingId {
             BindingId::Shortcuts => Chord::new(false, true, false, "/"),
             BindingId::Review => Chord::new(true, true, false, "r"),
             BindingId::DevTools => Chord::new(true, false, true, "i"),
+            BindingId::Split => c("\\"),
+            BindingId::SplitFocus => Chord::new(true, false, true, "\\"),
         }
     }
 }

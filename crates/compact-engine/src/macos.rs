@@ -80,7 +80,11 @@ pub struct WebKitEngine {
     /// having to carry engine state back down.
     urls: HashMap<TabId, String>,
     /// Which tab is currently visible; others are detached from the hierarchy.
+    /// In split view, the focused one.
     visible: Option<TabId>,
+    /// Every tab mounted in the container: `visible`, plus the other side of
+    /// a split. Everything else is detached.
+    mounted: Vec<TabId>,
     /// Whose data store each tab's view is built with. Absent means yours.
     profiles: HashMap<TabId, Profile>,
     /// One configuration per agent profile, made on first use and dropped
@@ -121,6 +125,7 @@ impl WebKitEngine {
             sessions: HashMap::new(),
             urls: HashMap::new(),
             visible: None,
+            mounted: Vec::new(),
             profiles: HashMap::new(),
             agent_configs: HashMap::new(),
             captures: HashMap::new(),
@@ -166,9 +171,8 @@ impl WebKitEngine {
         }
         if let Some(v) = &self.tools {
             v.setFrame(frame);
-            if unsafe { v.superview() }.is_none() {
-                self.container.addSubview(v);
-            }
+            // Re-adding brings it to the front, over pages mounted since.
+            self.container.addSubview(v);
         }
         fresh
     }
@@ -356,19 +360,41 @@ impl WebKitEngine {
     /// Detaching rather than merely hiding matters: an attached-but-hidden web
     /// view keeps compositing resources alive.
     pub fn show(&mut self, id: TabId) {
-        // No early return on `visible == id`: the view may have been rebuilt by
-        // a restore since it was last mounted, so re-mounting is the only way
-        // to be sure the hierarchy holds the current view for this tab.
-        if let Some(prev) = self.visible.take().filter(|p| *p != id) {
+        let frame = self.page_rect();
+        self.show_panes(&[(id, frame)], id);
+    }
+
+    /// Show exactly these tabs at these frames, `focused` being the one the
+    /// keyboard and the chrome belong to, and detach everything else.
+    ///
+    /// No early return when nothing seems to have changed: a view may have
+    /// been rebuilt by a restore since it was last mounted, so re-mounting is
+    /// the only way to be sure the hierarchy holds each tab's current view.
+    pub fn show_panes(&mut self, panes: &[(TabId, CGRect)], focused: TabId) {
+        let keep: Vec<TabId> = panes.iter().map(|(id, _)| *id).collect();
+        for id in std::mem::take(&mut self.mounted) {
+            if !keep.contains(&id) {
+                if let Some(v) = self.views.get(&id) {
+                    v.removeFromSuperview();
+                }
+            }
+        }
+        if let Some(prev) = self.visible.take().filter(|p| !keep.contains(p)) {
             if let Some(v) = self.views.get(&prev) {
                 v.removeFromSuperview();
             }
         }
-        let frame = self.page_rect();
-        if let Some(v) = self.views.get(&id) {
-            v.setFrame(frame);
-            self.container.addSubview(v);
-            self.visible = Some(id);
+        for (id, frame) in panes {
+            if let Some(v) = self.views.get(id) {
+                v.setFrame(*frame);
+                if unsafe { v.superview() }.is_none() {
+                    self.container.addSubview(v);
+                }
+                self.mounted.push(*id);
+            }
+        }
+        if self.mounted.contains(&focused) {
+            self.visible = Some(focused);
         }
     }
 
@@ -386,14 +412,18 @@ impl WebKitEngine {
             v.setFrame(self.container.bounds());
             self.container.addSubview(v);
             self.visible = Some(id);
+            if !self.mounted.contains(&id) {
+                self.mounted.push(id);
+            }
         }
     }
 
     /// Detach a tab's view from the hierarchy without destroying it.
-    pub fn unmount(&self, id: TabId) {
+    pub fn unmount(&mut self, id: TabId) {
         if let Some(v) = self.views.get(&id) {
             v.removeFromSuperview();
         }
+        self.mounted.retain(|m| *m != id);
     }
 
     /// The live view for a tab, for the UI layer to size or focus.
@@ -801,6 +831,7 @@ impl TabEngine for WebKitEngine {
         if self.visible == Some(id) {
             self.visible = None;
         }
+        self.mounted.retain(|m| *m != id);
         // Dropping the last `Retained` here releases the web view. WebKit parks
         // the content process in its reuse cache for ~5 s afterwards, which is
         // why measurement must sample on a schedule rather than immediately.
@@ -830,6 +861,7 @@ impl TabEngine for WebKitEngine {
         if self.visible == Some(id) {
             self.visible = None;
         }
+        self.mounted.retain(|m| *m != id);
         // An agent profile's store goes with its last tab, taking the
         // agent's cookies with it.
         if let Some(Profile::Agent(key)) = self.profiles.remove(&id) {

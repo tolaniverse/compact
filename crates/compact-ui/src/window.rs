@@ -32,6 +32,8 @@ use compact_mem::{Guard, PressureMonitor};
 
 #[path = "agents.rs"]
 mod agents;
+#[path = "panes.rs"]
+mod panes;
 
 use crate::chrome::{Chrome, Hit};
 use crate::overlays::{Overlays, SettingsHit};
@@ -86,6 +88,11 @@ struct Inner {
     tools_ready: bool,
     /// An entry to flash once the drawer is ready.
     tools_flash: Option<u64>,
+    /// The line between the sides of a split, and the focused side's bar.
+    split_marks: Option<panes::SplitMarks>,
+    /// The tab the keyboard was last given to, so focus moves only when the
+    /// focused side changes.
+    last_focus: Option<TabId>,
 }
 
 impl Inner {
@@ -169,7 +176,7 @@ impl Inner {
             // page leaves, nothing visibly arrives, and the transition reads as
             // a glitch. Prewarming means this is the uncommon case.
             Some((dir, true)) if self.app.chrome.smooth_motion => self.slide_workspace(active, dir),
-            _ => self.engine.show(active),
+            _ => self.layout(),
         }
     }
 
@@ -265,8 +272,9 @@ impl Inner {
         // the window regardless of what is revealed. Skipped mid-transition, or
         // it would snap the travelling pages back to centre.
         if !self.sliding {
-            // The page has the window unless the drawer is docked beside it.
-            self.layout_tools();
+            // The page has the window unless the drawer is docked beside it,
+            // or another workspace shares it in split view.
+            self.layout();
         }
     }
 
@@ -555,6 +563,8 @@ impl Shell {
             devtools_sent: 0,
             tools_ready: false,
             tools_flash: None,
+            split_marks: None,
+            last_focus: None,
         }));
         inner.borrow_mut().self_ref = Rc::downgrade(&inner);
 
@@ -753,6 +763,17 @@ fn install_monitors(inner: &Rc<RefCell<Inner>>) {
         let event = unsafe { event.as_ref() };
         let mut i = clicks.borrow_mut();
         let (x, y) = point_of(&i, event);
+
+        // A click on the other side of a split focuses it, and still lands
+        // on the page there.
+        if i.app.overlay == Overlay::None && i.chrome.hit(&i.app, x, y).is_none() {
+            if let Some(p) = i.app.panes() {
+                let side = panes::side_at(x, i.size().0);
+                if p.iter().any(|q| q.side == side && !q.focused) {
+                    i.dispatch(Action::FocusSide(side));
+                }
+            }
+        }
 
         match i.app.overlay {
             Overlay::Settings => {

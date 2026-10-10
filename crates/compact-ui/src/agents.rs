@@ -857,37 +857,12 @@ impl Inner {
             if self.tools_ready {
                 self.tools_point();
             }
-            self.layout_tools();
+            self.layout();
         } else {
             self.engine.close_tools();
             self.engine.set_page_frame(None);
             self.tools_ready = false;
-        }
-    }
-
-    /// Size and place the page and the drawer for the current dock, or give
-    /// the page everything when the drawer's tab is not in front.
-    pub(super) fn layout_tools(&mut self) {
-        let front = self.app.workspaces.current().active;
-        let (w, h) = self.size();
-        if self.app.devtools != Some(front) {
-            self.engine.hide_tools();
-            self.engine.set_page_frame(None);
-            return;
-        }
-        use compact_core::settings::Dock;
-        use crate::widgets::rect;
-        let side = (w * 0.4).clamp(340.0, 560.0).min(w - 200.0);
-        let bottom = (h * 0.38).max(220.0).min(h - 160.0);
-        // The container is not flipped: y runs up from the bottom.
-        let (page, tools) = match self.app.settings.devtools_dock {
-            Dock::Bottom => (rect(0.0, bottom, w, h - bottom), rect(0.0, 0.0, w, bottom)),
-            Dock::Right => (rect(0.0, 0.0, w - side, h), rect(w - side, 0.0, side, h)),
-            Dock::Left => (rect(side, 0.0, w - side, h), rect(0.0, 0.0, side, h)),
-        };
-        self.engine.set_page_frame(Some(page));
-        if self.engine.open_tools(tools) {
-            self.tools_ready = false;
+            self.layout();
         }
     }
 
@@ -938,7 +913,7 @@ impl Inner {
                 let d = v.get("dock").and_then(Value::as_str).and_then(compact_core::settings::Dock::from_slug);
                 if let Some(d) = d {
                     self.app.settings.devtools_dock = d;
-                    self.layout_tools();
+                    self.layout();
                 }
             }
             "measure" => {

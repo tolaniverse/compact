@@ -2301,3 +2301,102 @@ fn the_devtools_dock_is_remembered() {
     assert_eq!(back.settings.devtools_dock, Dock::Right);
     assert_eq!(Dock::from_slug("sideways"), None);
 }
+
+// ---- split view ----------------------------------------------------------------
+
+use crate::split::Side;
+
+#[test]
+fn split_view_puts_an_agents_workspace_beside_yours() {
+    let mut app = App::fresh();
+    let agent = app.open_agent_workspace("Claude Code", "~/site");
+    let m = Mods { cmd: true, shift: false, alt: false };
+    assert_eq!(app.resolve_key("\\", m, false), Some(Action::ToggleSplit));
+    app.apply(Action::ToggleSplit);
+    let panes = app.panes().expect("split");
+    assert_eq!((panes[0].workspace, panes[0].focused), (0, true), "yours on the left, focused");
+    assert_eq!((panes[1].workspace, panes[1].focused), (agent, false), "the agent's beside it");
+    assert_eq!(app.workspaces.spaces[agent].tabs[0].state, TabState::Live, "the other side is painted");
+    app.apply(Action::ToggleSplit);
+    assert!(app.panes().is_none());
+}
+
+#[test]
+fn without_an_agent_the_next_workspace_goes_beside() {
+    let mut app = App::fresh();
+    app.apply(Action::SwitchWorkspace(1));
+    app.apply(Action::ToggleSplit);
+    assert_eq!(app.split.unwrap().other, 2);
+}
+
+#[test]
+fn switching_sides_moves_focus_and_keeps_both() {
+    let mut app = App::fresh();
+    app.apply(Action::ToggleSplit);
+    let m = Mods { cmd: true, shift: false, alt: true };
+    assert_eq!(app.resolve_key("\\", m, false), Some(Action::FocusOtherSide));
+    app.apply(Action::FocusOtherSide);
+    assert_eq!(app.workspaces.current, 1);
+    let p = app.panes().unwrap();
+    assert_eq!((p[0].workspace, p[0].focused, p[1].workspace, p[1].focused), (0, false, 1, true), "sides stay put");
+    assert!(app.apply(Action::FocusSide(Side::Right)).is_empty(), "already there");
+    app.apply(Action::FocusSide(Side::Left));
+    assert_eq!(app.workspaces.current, 0);
+}
+
+#[test]
+fn cmd_digit_changes_the_focused_side_or_goes_to_the_other() {
+    let mut app = App::fresh();
+    app.apply(Action::ToggleSplit); // 0 | 1
+    let fx = app.apply(Action::SwitchWorkspace(2));
+    assert!(!fx.iter().any(|e| matches!(e, Effect::SlideWorkspace(_))), "no riffle in split view");
+    let p = app.panes().unwrap();
+    assert_eq!((p[0].workspace, p[1].workspace), (2, 1), "the focused side changed in place");
+    app.apply(Action::SwitchWorkspace(1));
+    assert_eq!(app.workspaces.current, 1, "asking for the other side goes there");
+    assert_eq!(app.split.unwrap().other, 2);
+}
+
+#[test]
+fn the_other_side_is_kept_live_under_budget() {
+    let mut app = App::new();
+    app.budget = crate::policy::LiveBudget { max_bytes: 150 * MB, max_live: 2, min_live: 1 };
+    app.apply(Action::ToggleSplit);
+    let other = app.other_side_tab().unwrap();
+    for _ in 0..3 {
+        app.apply(Action::NewTab);
+    }
+    let state = app.workspaces.locate(other).unwrap().1.state;
+    assert_eq!(state, TabState::Live, "on screen, so never evicted");
+}
+
+#[test]
+fn closing_the_workspace_on_the_other_side_ends_the_split() {
+    let mut app = App::fresh();
+    let agent = app.open_agent_workspace("Claude Code", "~/site");
+    app.apply(Action::ToggleSplit);
+    app.apply(Action::CloseWorkspace(agent));
+    assert!(app.split.is_none());
+}
+
+#[test]
+fn split_view_survives_a_restart_and_bad_files_drop_it() {
+    let mut app = App::fresh();
+    app.settings.startup = crate::settings::Startup::RestoreSession;
+    app.apply(Action::ToggleSplit);
+    app.apply(Action::FocusOtherSide);
+    let back = persist::decode(&app.snapshot()).unwrap();
+    assert_eq!(back.split, app.split);
+    assert_eq!(back.workspaces.current, 1);
+    let bad = app.snapshot().replace("split\t0\t", "split\t9\t");
+    assert!(persist::decode(&bad).unwrap().split.is_none(), "a workspace that is not there");
+}
+
+#[test]
+fn the_palette_offers_split_view() {
+    let mut app = App::fresh();
+    assert!(app.commands().iter().any(|c| c.label == "Split view" && c.hint == "⌘\\"));
+    app.apply(Action::ToggleSplit);
+    assert!(app.commands().iter().any(|c| c.label == "Close split view"));
+    assert!(app.commands().iter().any(|c| c.label == "Switch sides"));
+}

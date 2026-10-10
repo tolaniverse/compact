@@ -25,6 +25,7 @@ pub mod persist;
 pub mod policy;
 pub mod review;
 pub mod settings;
+pub mod split;
 pub mod tab;
 pub mod theme;
 pub mod workspace;
@@ -243,6 +244,8 @@ pub struct App {
     pub review: Option<TabId>,
     /// The tab with the developer tools drawer open, if any.
     pub devtools: Option<TabId>,
+    /// Split view, when two workspaces are side by side.
+    pub split: Option<split::Split>,
     /// The last comment id handed out. Saved, so ids never repeat.
     pub comment_seq: u64,
 
@@ -317,6 +320,7 @@ impl App {
             approvals: Vec::new(),
             review: None,
             devtools: None,
+            split: None,
             comment_seq: 0,
             query: String::new(),
             selection: 0,
@@ -387,16 +391,30 @@ impl App {
     }
 
     pub fn commands(&self) -> Vec<Command> {
-        command::filter(
-            command::command_list(
-                &self.settings.keymap,
-                self.chrome.layout,
-                self.chrome.pinned,
-                self.is_bookmarked(),
-                self.workspaces.current().agent.as_ref().map(|a| (self.workspaces.current, a)),
-            ),
-            &self.query,
-        )
+        let mut list = command::command_list(
+            &self.settings.keymap,
+            self.chrome.layout,
+            self.chrome.pinned,
+            self.is_bookmarked(),
+            self.workspaces.current().agent.as_ref().map(|a| (self.workspaces.current, a)),
+        );
+        let key = |b: settings::BindingId| self.settings.keymap.chord(b).label();
+        let split_row = Command {
+            icon: "◧",
+            label: if self.split.is_some() { "Close split view".into() } else { "Split view".into() },
+            hint: key(settings::BindingId::Split),
+            action: Action::ToggleSplit,
+        };
+        list.insert(4, split_row);
+        if self.split.is_some() {
+            list.insert(5, Command {
+                icon: "⇄",
+                label: "Switch sides".into(),
+                hint: key(settings::BindingId::SplitFocus),
+                action: Action::FocusOtherSide,
+            });
+        }
+        command::filter(list, &self.query)
     }
 
     /// Whether the active tab's host is saved.
@@ -629,6 +647,9 @@ impl App {
             }
             Action::ToggleReview => fx.extend(self.toggle_review()),
             Action::ToggleDevTools => fx.extend(self.toggle_devtools()),
+            Action::ToggleSplit => fx.extend(self.toggle_split()),
+            Action::FocusOtherSide => fx.extend(self.focus_other_side()),
+            Action::FocusSide(side) => fx.extend(self.focus_side(side)),
             Action::RevokeAgent(i) => {
                 self.overlay = Overlay::None;
                 fx.extend(self.revoke_agent(i));
@@ -663,6 +684,7 @@ impl App {
         fx.extend(tabs.into_iter().map(Effect::Destroy));
         self.settings.forget_workspace(index);
         self.notifications.forget_workspace(index);
+        self.split_after_remove(index);
         if was_current {
             // Back to your first workspace, the way ⌘1 would take you.
             self.address_draft = None;
@@ -899,6 +921,16 @@ impl App {
 
     fn switch_workspace(&mut self, to: usize, focus: Option<TabId>) -> Vec<Effect> {
         let mut fx = Vec::new();
+        // In split view, asking for the workspace on the other side means
+        // going there, not showing it twice.
+        if self.split.is_some_and(|s| s.other == to) {
+            fx.extend(self.focus_other_side());
+            if let Some(f) = focus {
+                self.workspaces.select(f);
+                fx.extend(self.select_tab(f));
+            }
+            return fx;
+        }
         let Some(dir) = self.workspaces.switch(to, focus) else {
             return fx;
         };
@@ -906,7 +938,11 @@ impl App {
         self.hint_visible = false;
         self.address_draft = None;
         self.notifications.clear_workspace(to);
-        fx.push(Effect::SlideWorkspace(dir));
+        // The card riffle is for the whole window; in split view only one
+        // side changes, and it changes in place.
+        if self.split.is_none() {
+            fx.push(Effect::SlideWorkspace(dir));
+        }
         let active = self.workspaces.current().active;
         fx.extend(self.select_tab(active));
         self.post_arrival(to);
@@ -1158,7 +1194,10 @@ impl App {
         let tabs = self.workspaces.all_tabs();
 
         let agent_tabs = self.workspaces.agent_tabs();
-        let working = self.workspaces.agent_working_tabs();
+        let mut working = self.workspaces.agent_working_tabs();
+        // The other side of a split is on screen, so it is kept like the
+        // tab you are looking at.
+        working.extend(self.other_side_tab());
         let plan =
             policy::plan_eviction_with(&tabs, active, &self.budget, self.pressure, &agent_tabs, &working);
         for id in &plan.hibernate {

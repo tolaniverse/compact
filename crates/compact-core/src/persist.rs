@@ -118,6 +118,9 @@ pub fn encode(app: &App) -> String {
 
     let ws = &app.workspaces;
     line(&mut out, &["current", &ws.current.to_string()]);
+    if let Some(sp) = app.split {
+        line(&mut out, &["split", &sp.other.to_string(), sp.side.slug()]);
+    }
     for (i, w) in ws.spaces.iter().enumerate() {
         line(
             &mut out,
@@ -286,6 +289,7 @@ pub fn decode(text: &str) -> Result<App, LoadError> {
     let mut bookmarks = Bookmarks::default();
     let mut approvals: Vec<crate::agent::Approval> = Vec::new();
     let mut comment_seq = 0u64;
+    let mut split = None;
     let mut binds: Vec<(BindingId, Chord)> = Vec::new();
 
     for (i, raw) in lines {
@@ -342,6 +346,12 @@ pub fn decode(text: &str) -> Result<App, LoadError> {
                     let m: Vec<char> = f[2].chars().collect();
                     let held = |i: usize| m.get(i).is_some_and(|c| *c != '-');
                     binds.push((id, Chord::new(held(0), held(1), held(2), &f[3])));
+                }
+            }
+            "split" => {
+                need(3)?;
+                if let (Ok(other), Some(side)) = (f[1].parse(), crate::split::Side::from_slug(&f[2])) {
+                    split = Some(crate::split::Split { other, side });
                 }
             }
             "current" => {
@@ -469,6 +479,8 @@ pub fn decode(text: &str) -> Result<App, LoadError> {
     app.comment_seq = comment_seq;
     app.workspaces = WorkspaceSet::from_saved(&spaces, current);
     apply_startup(&mut app);
+    app.split = split;
+    app.validate_split();
     Ok(app)
 }
 
