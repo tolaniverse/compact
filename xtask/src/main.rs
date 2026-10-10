@@ -71,7 +71,7 @@ fn help() {
         e.g. cargo xtask spike -- --tabs 12 --live 4
 
   cargo xtask dist
-        Release bundle, ready to ship.
+        Release build as out/Compact-<version>-arm64.dmg, with its .sha256.
 
   cargo xtask icon
         Rebuild assets/icon/Compact.icns from assets/icon/compact.svg.
@@ -294,8 +294,53 @@ fn icon_task() -> Result<(), String> {
     Ok(())
 }
 
+/// A release build as a disk image, with its checksum beside it:
+/// `out/Compact-<version>-arm64.dmg` and `….dmg.sha256`.
+///
+/// Apple Silicon only, so the host must be one: the build is for the host.
 fn dist_task() -> Result<(), String> {
-    bundle_task(&["--release".to_string()]).map(|_| ())
+    if env::consts::ARCH != "aarch64" {
+        return Err("Compact releases are Apple Silicon builds; run this on an arm64 Mac".into());
+    }
+    let app = bundle_task(&["--release".to_string()])?;
+    let root = workspace_root();
+    let out = root.join("out");
+    let name = format!("{DISPLAY_NAME}-{}-arm64.dmg", env!("CARGO_PKG_VERSION"));
+    let dmg = out.join(&name);
+
+    // The window people see when they open it: the app and a link to
+    // Applications to drag it onto.
+    let stage = out.join("dmg-stage");
+    let _ = fs::remove_dir_all(&stage);
+    fs::create_dir_all(&stage).map_err(|e| format!("creating {}: {e}", stage.display()))?;
+    run(Command::new("ditto").arg(&app).arg(stage.join(format!("{DISPLAY_NAME}.app"))), "copying the app")?;
+    std::os::unix::fs::symlink("/Applications", stage.join("Applications"))
+        .map_err(|e| format!("linking Applications: {e}"))?;
+
+    let _ = fs::remove_file(&dmg);
+    run(
+        Command::new("hdiutil")
+            .args(["create", "-volname", DISPLAY_NAME, "-fs", "HFS+", "-format", "UDZO", "-ov", "-srcfolder"])
+            .arg(&stage)
+            .arg(&dmg),
+        "making the disk image",
+    )?;
+    let _ = fs::remove_dir_all(&stage);
+
+    // Written from `out/` so the file names the image without a path, and
+    // `shasum -c` works wherever the two are downloaded together.
+    let sum = Command::new("shasum")
+        .current_dir(&out)
+        .args(["-a", "256", &name])
+        .output()
+        .map_err(|e| format!("running shasum: {e}"))?;
+    if !sum.status.success() {
+        return Err("shasum failed".into());
+    }
+    fs::write(out.join(format!("{name}.sha256")), &sum.stdout).map_err(|e| format!("writing the checksum: {e}"))?;
+    print!("{}", String::from_utf8_lossy(&sum.stdout));
+    println!("wrote {}", dmg.display());
+    Ok(())
 }
 
 fn test_task() -> Result<(), String> {
