@@ -2400,3 +2400,30 @@ fn the_palette_offers_split_view() {
     assert!(app.commands().iter().any(|c| c.label == "Close split view"));
     assert!(app.commands().iter().any(|c| c.label == "Switch sides"));
 }
+
+#[test]
+fn the_divider_moves_within_bounds_and_stays_put_across_focus() {
+    let mut app = App::fresh();
+    app.apply(Action::ToggleSplit);
+    assert_eq!(app.split.unwrap().ratio, 0.5);
+    app.set_split_ratio(0.62);
+    app.apply(Action::FocusOtherSide);
+    assert_eq!(app.split.unwrap().ratio, 0.62, "switching sides does not move it");
+    app.set_split_ratio(0.05);
+    assert_eq!(app.split.unwrap().ratio, crate::split::MIN_RATIO);
+    app.set_split_ratio(f64::NAN);
+    assert_eq!(app.split.unwrap().ratio, 0.5);
+}
+
+#[test]
+fn the_divider_is_saved_and_old_files_get_an_even_split() {
+    let mut app = App::fresh();
+    app.settings.startup = crate::settings::Startup::RestoreSession;
+    app.apply(Action::ToggleSplit);
+    app.set_split_ratio(0.3);
+    let text = app.snapshot();
+    assert_eq!(persist::decode(&text).unwrap().split.unwrap().ratio, 0.3);
+    let old = text.replace("split\t1\tleft\t0.3", "split\t1\tleft");
+    assert_ne!(old, text);
+    assert_eq!(persist::decode(&old).unwrap().split.unwrap().ratio, 0.5);
+}

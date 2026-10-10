@@ -4,6 +4,11 @@ All notable changes to Compact are recorded here. Versions follow
 [Semantic Versioning](https://semver.org); before 1.0, a minor version may
 change behaviour.
 
+## Unreleased
+
+- Split view's divider can be dragged, from a quarter to three quarters of
+  the width; double-click it for an even split. Where you leave it is saved.
+
 ## 0.1.0 — 2026-10-10
 
 The first release. Apple Silicon Macs, macOS 11 or later; signed ad hoc, not

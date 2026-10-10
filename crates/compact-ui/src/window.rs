@@ -93,6 +93,10 @@ struct Inner {
     /// The tab the keyboard was last given to, so focus moves only when the
     /// focused side changes.
     last_focus: Option<TabId>,
+    /// True while the split divider is being dragged.
+    dragging_divider: bool,
+    /// True while the pointer is over the divider and its cursor is showing.
+    on_divider: bool,
 }
 
 impl Inner {
@@ -565,6 +569,8 @@ impl Shell {
             tools_flash: None,
             split_marks: None,
             last_focus: None,
+            dragging_divider: false,
+            on_divider: false,
         }));
         inner.borrow_mut().self_ref = Rc::downgrade(&inner);
 
@@ -749,12 +755,48 @@ fn install_monitors(inner: &Rc<RefCell<Inner>>) {
         }
         // Hover is only meaningful over visible chrome; hit-testing hidden
         // chrome would tint rows nobody can see.
+        // The resize cursor over the divider. Pages set their own cursors as
+        // the pointer moves over them, so leaving the divider only needs the
+        // arrow put back once.
+        let over = i.app.split.is_some_and(|s| panes::on_divider(x, s.ratio, size.0));
+        if over {
+            panes::divider_cursor();
+        } else if i.on_divider {
+            objc2_app_kit::NSCursor::arrowCursor().set();
+        }
+        i.on_divider = over;
         let hit = i.chrome.hit(&i.app, x, y);
         let hovered = i.chrome.set_hover(hit);
         if revealed || hovered {
             i.render();
         }
         event as *const NSEvent as *mut NSEvent
+    });
+
+    // ---- the split divider ----
+    let drags = inner.clone();
+    let drag_block = RcBlock::new(move |event: NonNull<NSEvent>| -> *mut NSEvent {
+        let event = unsafe { event.as_ref() };
+        let mut i = drags.borrow_mut();
+        if !i.dragging_divider {
+            return event as *const NSEvent as *mut NSEvent;
+        }
+        let (x, _) = point_of(&i, event);
+        let w = i.size().0;
+        i.app.set_split_ratio(panes::ratio_at(x, w));
+        panes::divider_cursor();
+        i.render();
+        std::ptr::null_mut()
+    });
+    let ups = inner.clone();
+    let up_block = RcBlock::new(move |event: NonNull<NSEvent>| -> *mut NSEvent {
+        let event = unsafe { event.as_ref() };
+        let mut i = ups.borrow_mut();
+        if !i.dragging_divider {
+            return event as *const NSEvent as *mut NSEvent;
+        }
+        i.dragging_divider = false;
+        std::ptr::null_mut()
     });
 
     // ---- clicks ----
@@ -764,11 +806,26 @@ fn install_monitors(inner: &Rc<RefCell<Inner>>) {
         let mut i = clicks.borrow_mut();
         let (x, y) = point_of(&i, event);
 
+        // The gap between the sides is a handle: drag it to resize, or
+        // double-click it for an even split.
+        if let Some(s) = i.app.split {
+            if i.app.overlay == Overlay::None && panes::on_divider(x, s.ratio, i.size().0) {
+                if event.clickCount() >= 2 {
+                    i.app.set_split_ratio(0.5);
+                    i.render();
+                } else {
+                    i.dragging_divider = true;
+                }
+                return std::ptr::null_mut();
+            }
+        }
+
         // A click on the other side of a split focuses it, and still lands
         // on the page there.
         if i.app.overlay == Overlay::None && i.chrome.hit(&i.app, x, y).is_none() {
             if let Some(p) = i.app.panes() {
-                let side = panes::side_at(x, i.size().0);
+                let ratio = i.app.split.map_or(0.5, |s| s.ratio);
+                let side = panes::side_at(x, ratio, i.size().0);
                 if p.iter().any(|q| q.side == side && !q.focused) {
                     i.dispatch(Action::FocusSide(side));
                 }
@@ -879,6 +936,8 @@ fn install_monitors(inner: &Rc<RefCell<Inner>>) {
     unsafe {
         NSEvent::addLocalMonitorForEventsMatchingMask_handler(NSEventMask::KeyDown, &key_block);
         NSEvent::addLocalMonitorForEventsMatchingMask_handler(NSEventMask::MouseMoved, &move_block);
+        NSEvent::addLocalMonitorForEventsMatchingMask_handler(NSEventMask::LeftMouseDragged, &drag_block);
+        NSEvent::addLocalMonitorForEventsMatchingMask_handler(NSEventMask::LeftMouseUp, &up_block);
         NSEvent::addLocalMonitorForEventsMatchingMask_handler(
             NSEventMask::LeftMouseDown,
             &click_block,

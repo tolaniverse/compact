@@ -43,12 +43,31 @@ impl Side {
     }
 }
 
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+#[derive(Clone, Copy, PartialEq, Debug)]
 pub struct Split {
     /// The workspace on the side that is not focused.
     pub other: usize,
     /// Which side the focused (current) workspace is on.
     pub side: Side,
+    /// How much of the width the left side gets, from [`MIN_RATIO`] to
+    /// [`MAX_RATIO`]. Belongs to the sides, not to focus: switching sides
+    /// leaves the divider where it is.
+    pub ratio: f64,
+}
+
+/// The narrowest a side can be dragged, as a share of the width.
+pub const MIN_RATIO: f64 = 0.25;
+/// The widest a side can be dragged.
+pub const MAX_RATIO: f64 = 0.75;
+
+/// A ratio brought within bounds; anything that is not a number is an even
+/// split.
+pub fn clamp_ratio(r: f64) -> f64 {
+    if r.is_finite() {
+        r.clamp(MIN_RATIO, MAX_RATIO)
+    } else {
+        0.5
+    }
 }
 
 /// What each side shows, for the shell to lay out.
@@ -81,7 +100,7 @@ impl App {
             .position(|w| w.is_agent())
             .filter(|i| *i != ws)
             .unwrap_or((ws + 1) % n);
-        self.split = Some(Split { other, side: Side::Left });
+        self.split = Some(Split { other, side: Side::Left, ratio: 0.5 });
         self.overlay = crate::Overlay::None;
         self.wake_other(&mut fx);
         let name = self.workspaces.spaces[other].name.clone();
@@ -107,7 +126,7 @@ impl App {
         self.workspaces.current = s.other;
         self.workspaces.spaces[s.other].unread = 0;
         self.notifications.clear_workspace(s.other);
-        self.split = Some(Split { other: was, side: s.side.flip() });
+        self.split = Some(Split { other: was, side: s.side.flip(), ratio: s.ratio });
         self.overlay = crate::Overlay::None;
         self.address_draft = None;
         let tab = self.workspaces.current().active;
@@ -121,6 +140,13 @@ impl App {
         match self.split {
             Some(s) if s.side != side => self.focus_other_side(),
             _ => Vec::new(),
+        }
+    }
+
+    /// Move the divider so the left side gets `ratio` of the width.
+    pub fn set_split_ratio(&mut self, ratio: f64) {
+        if let Some(s) = self.split.as_mut() {
+            s.ratio = clamp_ratio(ratio);
         }
     }
 

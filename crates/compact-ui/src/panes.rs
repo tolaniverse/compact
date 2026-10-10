@@ -71,14 +71,51 @@ pub(super) struct SplitMarks {
     labels: [PaneLabel; 2],
 }
 
-/// A side's whole area: its card on top, its label underneath.
-fn side_area(side: Side, w: f64, h: f64) -> CGRect {
-    let width = ((w - 3.0 * PAD) / 2.0).floor();
-    let x = match side {
-        Side::Left => PAD,
-        Side::Right => w - PAD - width,
-    };
-    rect(x, PAD, width, h - 2.0 * PAD)
+/// How far either side of the gap's centre a press still grabs the divider.
+const GRAB: f64 = 6.0;
+
+/// The width the two cards share between them.
+fn shared(w: f64) -> f64 {
+    (w - 3.0 * PAD).max(0.0)
+}
+
+/// A side's whole area: its card on top, its label underneath. `ratio` is
+/// the left side's share of the width.
+fn side_area(side: Side, ratio: f64, w: f64, h: f64) -> CGRect {
+    let left = (shared(w) * ratio).floor();
+    match side {
+        Side::Left => rect(PAD, PAD, left, h - 2.0 * PAD),
+        Side::Right => rect(2.0 * PAD + left, PAD, shared(w) - left, h - 2.0 * PAD),
+    }
+}
+
+/// The centre of the gap between the cards, in window coordinates.
+pub(super) fn divider_x(ratio: f64, w: f64) -> f64 {
+    PAD + (shared(w) * ratio).floor() + PAD / 2.0
+}
+
+/// Show the cursor for dragging the divider.
+///
+/// `resizeLeftRightCursor` is deprecated in favour of
+/// `columnResizeCursorInDirections:`, which only exists from macOS 15;
+/// Compact supports macOS 11, so the older one stays.
+#[allow(deprecated)]
+pub(super) fn divider_cursor() {
+    objc2_app_kit::NSCursor::resizeLeftRightCursor().set();
+}
+
+/// Whether a point `x` is on the divider.
+pub(super) fn on_divider(x: f64, ratio: f64, w: f64) -> bool {
+    (x - divider_x(ratio, w)).abs() <= GRAB
+}
+
+/// The ratio that puts the divider's centre at `x`.
+pub(super) fn ratio_at(x: f64, w: f64) -> f64 {
+    let s = shared(w);
+    if s <= 0.0 {
+        return 0.5;
+    }
+    compact_core::split::clamp_ratio((x - PAD - PAD / 2.0) / s)
 }
 
 fn card_of(area: CGRect) -> CGRect {
@@ -90,8 +127,8 @@ fn label_of(area: CGRect) -> CGRect {
 }
 
 /// Which side a point in window coordinates (from the top left) is on.
-pub(super) fn side_at(x: f64, w: f64) -> Side {
-    if x < w / 2.0 {
+pub(super) fn side_at(x: f64, ratio: f64, w: f64) -> Side {
+    if x < divider_x(ratio, w) {
         Side::Left
     } else {
         Side::Right
@@ -118,12 +155,13 @@ impl Inner {
         let panes = self.app.panes();
         let front = self.app.workspaces.current().active;
         let split = panes.is_some();
+        let ratio = self.app.split.map_or(0.5, |s| s.ratio);
 
         // Every page on screen with the card it owns, focused first.
         let shown: Vec<(Option<Pane>, TabId, CGRect)> = match panes {
             None => vec![(None, front, rect(0.0, 0.0, w, h))],
             Some(p) => {
-                let mut v: Vec<_> = p.iter().map(|q| (Some(*q), q.tab, card_of(side_area(q.side, w, h)))).collect();
+                let mut v: Vec<_> = p.iter().map(|q| (Some(*q), q.tab, card_of(side_area(q.side, ratio, w, h)))).collect();
                 v.sort_by_key(|(_, t, _)| *t != front);
                 v
             }
@@ -171,7 +209,7 @@ impl Inner {
         if let Some(t) = self.engine.tools_view() {
             style(t, if split { RADIUS } else { 0.0 }, None);
         }
-        self.draw_labels(panes, w, h);
+        self.draw_labels(panes, ratio, w, h);
 
         // In split view the keyboard follows focus, so typing goes to the
         // side the chrome now speaks for.
@@ -203,7 +241,7 @@ impl Inner {
 
     /// The label under each side: its marker, its workspace and what it
     /// shows. Hidden whenever there is no split.
-    fn draw_labels(&mut self, panes: Option<[Pane; 2]>, w: f64, h: f64) {
+    fn draw_labels(&mut self, panes: Option<[Pane; 2]>, ratio: f64, w: f64, h: f64) {
         let Some(panes) = panes else {
             if let Some(m) = &self.split_marks {
                 for l in &m.labels {
@@ -219,7 +257,7 @@ impl Inner {
         let marks = self.split_marks.as_ref().expect("just made");
         for (q, l) in panes.iter().zip(&marks.labels) {
             let ws = &self.app.workspaces.spaces[q.workspace];
-            let area = label_of(side_area(q.side, w, h));
+            let area = label_of(side_area(q.side, ratio, w, h));
             l.view.setFrame(area);
             l.view.setHidden(false);
             let width = area.size.width;
@@ -235,6 +273,43 @@ impl Inner {
             set_text(&l.title, &title);
             // Above the pages, which may have just been mounted.
             self.page.addSubview(&l.view);
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn dragging_the_divider_to_a_point_puts_it_there() {
+        let w = 1480.0;
+        for r in [0.3, 0.5, 0.62] {
+            let x = divider_x(r, w);
+            assert!((ratio_at(x, w) - r).abs() < 0.002, "ratio {r}");
+            assert!(on_divider(x, r, w));
+            assert!(on_divider(x + GRAB, r, w) && !on_divider(x + GRAB + 1.0, r, w));
+        }
+    }
+
+    #[test]
+    fn the_divider_stops_at_a_quarter_either_way() {
+        let w = 1480.0;
+        assert_eq!(ratio_at(0.0, w), compact_core::split::MIN_RATIO);
+        assert_eq!(ratio_at(w, w), compact_core::split::MAX_RATIO);
+    }
+
+    #[test]
+    fn the_sides_and_gaps_fill_the_width_exactly() {
+        let (w, h) = (1480.0, 900.0);
+        for r in [0.25, 0.5, 0.7] {
+            let l = side_area(Side::Left, r, w, h);
+            let rt = side_area(Side::Right, r, w, h);
+            assert_eq!(l.origin.x, PAD);
+            assert_eq!(rt.origin.x - (l.origin.x + l.size.width), PAD, "one gap between");
+            assert_eq!(rt.origin.x + rt.size.width, w - PAD, "the right edge's margin");
+            assert_eq!(side_at(divider_x(r, w) - 1.0, r, w), Side::Left);
+            assert_eq!(side_at(divider_x(r, w) + 1.0, r, w), Side::Right);
         }
     }
 }

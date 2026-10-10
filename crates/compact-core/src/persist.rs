@@ -119,7 +119,7 @@ pub fn encode(app: &App) -> String {
     let ws = &app.workspaces;
     line(&mut out, &["current", &ws.current.to_string()]);
     if let Some(sp) = app.split {
-        line(&mut out, &["split", &sp.other.to_string(), sp.side.slug()]);
+        line(&mut out, &["split", &sp.other.to_string(), sp.side.slug(), &sp.ratio.to_string()]);
     }
     for (i, w) in ws.spaces.iter().enumerate() {
         line(
@@ -351,7 +351,9 @@ pub fn decode(text: &str) -> Result<App, LoadError> {
             "split" => {
                 need(3)?;
                 if let (Ok(other), Some(side)) = (f[1].parse(), crate::split::Side::from_slug(&f[2])) {
-                    split = Some(crate::split::Split { other, side });
+                    // A file from before the divider moved has no ratio.
+                    let ratio = f.get(3).and_then(|r| r.parse().ok()).map_or(0.5, crate::split::clamp_ratio);
+                    split = Some(crate::split::Split { other, side, ratio });
                 }
             }
             "current" => {
